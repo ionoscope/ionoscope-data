@@ -1,0 +1,40 @@
+[run]
+# UTC interval. Leave empty to use the last N hours.
+start_utc = ""
+end_utc = ""
+lookback_hours = 24
+output_dir = "data"
+timeout_seconds = 45
+
+[giro]
+enabled = true
+# Examples: MO155 Moscow-Parus-A, BC840 Boulder, AT138 Athens, DB049 Dourbes.
+# Use "all" to query every station listed in the GIRO FastChar form.
+stations = ["MO155", "BC840"]
+# Use "all" to request every FastChar parameter available in the GIRO form.
+# You can also provide a smaller list, for example:
+# ["foF2", "MUFD", "hmF2", "TEC", "fmin"]
+characteristics = "all"
+muf_distance_km = 3000
+
+[noaa]
+enabled = true
+# Open SWPC endpoints. Add/remove URLs as needed; JSON arrays are normalized automatically.
+endpoints = [
+  { name = "planetary_k_index_1m", url = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json" },
+  { name = "f107_cm_flux", url = "https://services.swpc.noaa.gov/json/f107_cm_flux.json" },
+  { name = "goes_primary_xrays_3_day", url = "https://services.swpc.noaa.gov/json/goes/primary/xrays-3-day.json" },
+  { name = "solar_wind_mag_2_hour", url = "https://services.swpc.noaa.gov/products/solar-wind/mag-2-hour.json" },
+  { name = "solar_wind_plasma_2_hour", url = "https://services.swpc.noaa.gov/products/solar-wind/plasma-2-hour.json" }
+]
+
+[preprocess]
+# Keep GIRO values within physically plausible broad limits; outliers become blank.
+fof2_min_mhz = 0.5
+fof2_max_mhz = 25.0
+hmf2_min_km = 100.0
+hmf2_max_km = 700.0
+tec_min_tecu = 0.0
+tec_max_tecu = 300.0
+# NOAA rows matched to GIRO rows by nearest timestamp.
+join_tolerance_minutes = 90
