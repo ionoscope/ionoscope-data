@@ -12,7 +12,8 @@ This folder contains the first IonoScope module: automated collection and prepro
 ## Run
 
 ```powershell
-Set-Location D:\ionoscope\data_collection_preprocessing
+git clone https://github.com/ionoscope/ionoscope-data.git
+Set-Location .\ionoscope-data
 python .\collect_hf_data.py --config .\config.toml
 ```
 
