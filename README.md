@@ -1,43 +1,104 @@
-# Data Collection and Preprocessing
+# Ionoscope Data
 
-This folder contains the first IonoScope module: automated collection and preprocessing of ionospheric and space-weather data from GIRO and NOAA.
+This repository contains the shared data layer for Ionoscope. It owns data
+collection, data preparation and feature engineering. Downstream ML and LLM
+projects should consume prepared outputs from this repository instead of
+duplicating the same data logic.
 
-## Contents
+## Repository Structure
 
-- `collect_hf_data.py` - main Python script.
-- `config.toml` - source and preprocessing settings.
-- `update_data.ps1` - Windows helper script for running the update.
-- `requirements.txt` - minimal Python dependencies for this module.
+- `collect_hf_data.py` - collection of GIRO, NOAA/SWPC, GFZ and OMNI data.
+- `config.toml` - default collection configuration.
+- `config.all_stations.temp.toml` - helper config for broad all-station pulls.
+- `update_data.ps1` - Windows helper script for running collection.
+- `data_preparation/` - cleaning, quality checks and normalization to a common UTC time grid.
+- `feature_engineering/` - leak-aware feature table generation for forecasting experiments.
+- `tests/` - parser and collection tests.
 
-## Run
+Generated datasets, raw downloads, logs and cache files are intentionally not
+tracked by Git.
+
+## Pipeline
+
+The data pipeline is split into three stages:
+
+1. Collection: download and normalize raw source records from GIRO, NOAA/SWPC,
+   GFZ and OMNI.
+2. Preparation: clean collected CSV files, evaluate quality and align station
+   observations and external indices to a common time grid.
+3. Feature engineering: build lag, difference, time-cycle, driver and forecast
+   target columns for ML and AutoML experiments.
+
+## Install
+
+Python 3.11+ is recommended.
 
 ```powershell
-git clone https://github.com/ionoscope/ionoscope-data.git
-Set-Location .\ionoscope-data
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pip install -r data_preparation\requirements.txt
+python -m pip install -r feature_engineering\requirements.txt
+```
+
+## Run Collection
+
+Use the default interval from `config.toml`:
+
+```powershell
 python .\collect_hf_data.py --config .\config.toml
 ```
 
 Run for a custom UTC interval:
 
 ```powershell
-python .\collect_hf_data.py --config .\config.toml --start 2012-07-02T21:00:00Z --end 2012-07-03T03:00:00Z
+python .\collect_hf_data.py --config .\config.toml --start 2024-01-01T00:00:00Z --end 2024-02-01T00:00:00Z
 ```
 
-## Output
+Collect only selected sources:
 
-By default, files are written to `data/` inside this module:
+```powershell
+python .\collect_hf_data.py --config .\config.toml --sources giro,gfz
+```
+
+By default, collection writes files to `data/`:
 
 - `data/raw/giro`
 - `data/raw/noaa`
+- `data/raw/gfz`
+- `data/raw/omni`
 - `data/processed/giro_scaled.csv`
-- `data/processed/giro_scaled.json`
 - `data/processed/noaa_observations.csv`
-- `data/processed/noaa_observations.json`
+- `data/processed/geophysical_indices.csv`
+- `data/processed/omni_solar_wind.csv`
 - `data/processed/analytical_hf_dataset.csv`
-- `data/processed/analytical_hf_dataset.json`
+- `data/metadata/stations.json`
+- `data/logs/collection_events.jsonl`
 - `data/run_manifest.json`
 
-JSON files use the same envelope:
+## Run Data Preparation
+
+```powershell
+python .\data_preparation\clean_collected_data.py --input-dir .\data --output-dir .\cleaned
+python .\data_preparation\normalize_time_grid.py --processed-dir .\cleaned\processed --output-dir .\normalized --time-config .\data_preparation\configs\time_normalization.json
+```
+
+For large station sets, use the station selection configs in
+`data_preparation/configs/`.
+
+## Run Feature Engineering
+
+```powershell
+python .\feature_engineering\build_features.py --input-dir .\normalized_by_station --config .\feature_engineering\configs\feature_engineering.json --output-dir .\features
+```
+
+The feature builder creates target columns separately from feature columns. Lag
+features use past values, and forecast targets use future values with
+`shift(-horizon)`.
+
+## JSON Envelope
+
+Processed JSON files use the same envelope:
 
 ```json
 {
@@ -48,7 +109,16 @@ JSON files use the same envelope:
 }
 ```
 
-GIRO stations may have no data for some time intervals. In that case the script writes diagnostic rows and continues processing NOAA data.
+## Notes
+
+GIRO stations may have no data for some time intervals. In that case the
+collector writes diagnostic rows and continues processing the available external
+indices when `continue_on_error` is enabled.
+
+Current GIRO station values are used as state features for forecasting from an
+available observation. If a downstream model must forecast without current GIRO
+measurements, those state columns should be excluded and only lagged values
+should be used.
 
 ## Tests
 
