@@ -13,6 +13,7 @@ duplicating the same data logic.
 - `update_data.ps1` - Windows helper script for running collection.
 - `data_preparation/` - cleaning, quality checks and normalization to a common UTC time grid.
 - `feature_engineering/` - leak-aware feature table generation for forecasting experiments.
+- `api/` - FastAPI access layer for station metadata and prepared features.
 - `tests/` - parser and collection tests.
 
 Generated datasets, raw downloads, logs and cache files are intentionally not
@@ -95,6 +96,19 @@ python .\feature_engineering\build_features.py --input-dir .\normalized_by_stati
 The feature builder creates target columns separately from feature columns. Lag
 features use past values, and forecast targets use future values with
 `shift(-horizon)`.
+
+## Run Data API
+
+```powershell
+python -m uvicorn api.main:app --reload --port 8001
+```
+
+Initial endpoints:
+
+- `GET /health`
+- `GET /api/v1/stations`
+- `GET /api/v1/stations/{station}`
+- `GET /api/v1/features/{station}/latest`
 
 ## JSON Envelope
 
