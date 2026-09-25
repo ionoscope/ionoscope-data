@@ -121,6 +121,14 @@ Initial endpoints:
 - `GET /api/v1/stations`
 - `GET /api/v1/stations/{station}`
 - `GET /api/v1/features/{station}/latest`
+- `GET /api/v1/features/{station}?start=...&end=...`
+- `GET /api/v1/availability/{station}?start=...&end=...`
+- `POST /api/v1/updates`
+- `GET /api/v1/updates/{task_id}`
+
+The API is designed to serve already prepared features quickly. If the requested
+station and period are not available yet, create an update task and let a
+scheduler or worker run `update_prepared_data.py` before retrying the request.
 
 ## JSON Envelope
 

@@ -29,3 +29,39 @@ class FeatureResponse(BaseModel):
     station: str
     timestamp: datetime
     features: dict[str, float] = Field(default_factory=dict)
+
+
+class FeatureSeriesResponse(BaseModel):
+    station: str
+    start: datetime
+    end: datetime
+    records: list[FeatureResponse]
+
+
+class DataAvailabilityResponse(BaseModel):
+    station: str
+    requested_start: datetime
+    requested_end: datetime
+    available: bool
+    available_from: datetime | None = None
+    available_to: datetime | None = None
+    feature_file: str | None = None
+    update_required: bool = False
+
+
+class UpdateRequest(BaseModel):
+    station: str
+    start: datetime
+    end: datetime
+    sources: str = "all"
+
+
+class UpdateTask(BaseModel):
+    task_id: str
+    status: str
+    station: str
+    start: datetime
+    end: datetime
+    sources: str = "all"
+    created_at: datetime
+    message: str
