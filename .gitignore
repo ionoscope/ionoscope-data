@@ -219,7 +219,7 @@ __marimo__/
 
 # IonoScope generated data and reports
 data/
-data_*/
+/data_tr*/
 cleaned*/
 normalized*/
 features*/
