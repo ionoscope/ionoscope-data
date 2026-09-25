@@ -97,6 +97,18 @@ The feature builder creates target columns separately from feature columns. Lag
 features use past values, and forecast targets use future values with
 `shift(-horizon)`.
 
+## Update Prepared API Data
+
+API requests should read already prepared feature tables. Run the update command
+ahead of user traffic, manually or from a scheduler:
+
+```powershell
+python .\update_prepared_data.py --start 2025-01-01T00:00:00Z --end 2025-02-01T00:00:00Z --station-set .\data_preparation\configs\station_sets\exploration_v0.1.json
+```
+
+The update writes feature tables to `features/stations/`, where the Data API can
+serve them immediately.
+
 ## Run Data API
 
 ```powershell
