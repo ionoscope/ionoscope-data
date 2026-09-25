@@ -11,6 +11,7 @@ from .schemas import FeatureResponse, Station
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STATION_METADATA_PATH = PROJECT_ROOT / "feature_engineering" / "configs" / "stations_metadata.csv"
 DEFAULT_FEATURE_DIR = PROJECT_ROOT / "features"
+DEFAULT_FEATURE_STATION_DIR = DEFAULT_FEATURE_DIR / "stations"
 TIME_COLUMNS = ("time_utc", "timestamp", "datetime", "time")
 IGNORED_FEATURE_COLUMNS = {"station", "interval"}
 
@@ -76,6 +77,9 @@ def get_latest_features(station: str) -> FeatureResponse:
 
 
 def _feature_file(station: str) -> Path:
+    station_file = DEFAULT_FEATURE_STATION_DIR / f"{station}_features.csv"
+    if station_file.exists():
+        return station_file
     return DEFAULT_FEATURE_DIR / f"{station}_features.csv"
 
 

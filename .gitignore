@@ -219,6 +219,10 @@ __marimo__/
 
 # IonoScope generated data and reports
 data/
+data_*/
+cleaned*/
+normalized*/
+features*/
 test_output/
 test_output_*/
 *.aux

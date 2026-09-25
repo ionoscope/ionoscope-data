@@ -62,6 +62,12 @@ Collect only selected sources:
 python .\collect_hf_data.py --config .\config.toml --sources giro,gfz
 ```
 
+For the first Data API scenario, collect only the starter station `TR169`:
+
+```powershell
+python .\collect_hf_data.py --config .\config.tr169.toml
+```
+
 By default, collection writes files to `data/`:
 
 - `data/raw/giro`
@@ -90,13 +96,20 @@ For large station sets, use the station selection configs in
 For the first Data API scenario, normalize only the starter station `TR169`:
 
 ```powershell
-python .\data_preparation\normalize_time_grid.py --processed-dir .\cleaned\processed --output-dir .\normalized_tr169 --time-config .\data_preparation\configs\time_normalization.json --station-set .\data_preparation\configs\station_sets\api_tr169_v0.1.json
+python .\data_preparation\clean_collected_data.py --input-dir .\data_tr169 --output-dir .\cleaned_tr169
+python .\data_preparation\normalize_time_grid.py --giro-raw-dir .\data_tr169\raw\giro --processed-dir .\cleaned_tr169\processed --output-dir .\normalized_tr169 --time-config .\data_preparation\configs\time_normalization.json --station-set .\data_preparation\configs\station_sets\api_tr169_v0.1.json --split-by-station
 ```
 
 ## Run Feature Engineering
 
 ```powershell
 python .\feature_engineering\build_features.py --input-dir .\normalized_by_station --config .\feature_engineering\configs\feature_engineering.json --output-dir .\features
+```
+
+For the first Data API scenario:
+
+```powershell
+python .\feature_engineering\build_features.py --input-dir .\normalized_tr169 --config .\feature_engineering\configs\feature_engineering.json --output-dir .\features --station TR169
 ```
 
 The feature builder creates target columns separately from feature columns. Lag
