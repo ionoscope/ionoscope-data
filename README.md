@@ -87,6 +87,12 @@ python .\data_preparation\normalize_time_grid.py --processed-dir .\cleaned\proce
 For large station sets, use the station selection configs in
 `data_preparation/configs/`.
 
+For the first Data API scenario, normalize only the starter station `TR169`:
+
+```powershell
+python .\data_preparation\normalize_time_grid.py --processed-dir .\cleaned\processed --output-dir .\normalized_tr169 --time-config .\data_preparation\configs\time_normalization.json --station-set .\data_preparation\configs\station_sets\api_tr169_v0.1.json
+```
+
 ## Run Feature Engineering
 
 ```powershell
