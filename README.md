@@ -109,6 +109,15 @@ python .\update_prepared_data.py --start 2025-01-01T00:00:00Z --end 2025-02-01T0
 The update writes feature tables to `features/stations/`, where the Data API can
 serve them immediately.
 
+Queued update tasks can be processed by a worker:
+
+```powershell
+python .\run_update_tasks.py
+```
+
+For a scheduler, run this worker periodically. It moves tasks from `queued` to
+`running`, then to `completed` or `failed`.
+
 ## Run Data API
 
 ```powershell
