@@ -227,3 +227,8 @@ update_tasks/
 test_output/
 test_output_*/
 *.aux
+
+# Local incremental workspaces and experiments
+/runs/
+/live_data/
+/output/

@@ -62,6 +62,8 @@ def main() -> None:
     parser.add_argument("--station-selection-config", default="configs/station_selection.json")
     parser.add_argument("--freq", default="auto", help="Pandas frequency, for example 5min. Use auto to infer.")
     parser.add_argument("--min-cs", type=float, default=50.0, help="Soft GIRO confidence cutoff.")
+    parser.add_argument("--cs-filter", choices=["threshold", "off"], default="threshold",
+                        help="Use a CS threshold or retain all rows for experiments.")
     parser.add_argument(
         "--max-interpolate-gap",
         default="30min",
@@ -96,7 +98,8 @@ def main() -> None:
     print(f"Active GIRO stations: {len(active_stations)}")
 
     print("Normalizing GIRO to time grid...")
-    normalized_giro = normalize_giro(giro, freq, args.min_cs, args.max_interpolate_gap)
+    min_cs = args.min_cs if args.cs_filter == "threshold" else None
+    normalized_giro = normalize_giro(giro, freq, min_cs, args.max_interpolate_gap)
     if not args.quality_only:
         normalized_giro.to_csv(output_dir / "giro_time_grid.csv", index=False)
 
@@ -128,7 +131,7 @@ def main() -> None:
         excluded,
         active_stations,
         freq,
-        args.min_cs,
+        min_cs,
         args.max_interpolate_gap,
         station_files,
         quality_files,
@@ -274,14 +277,19 @@ def infer_frequency(times: pd.Series) -> str:
     return f"{mode_minutes}min"
 
 
-def normalize_giro(df: pd.DataFrame, freq: str, min_cs: float, max_interpolate_gap: str) -> pd.DataFrame:
-    filtered = df[(df["CS"].isna()) | (df["CS"] == -1) | (df["CS"] >= min_cs)].copy()
+def normalize_giro(df: pd.DataFrame, freq: str, min_cs: float | None, max_interpolate_gap: str) -> pd.DataFrame:
+    filtered = (df.copy() if min_cs is None else
+                df[(df["CS"].isna()) | (df["CS"] == -1) | (df["CS"] >= min_cs)].copy())
     numeric_columns = [column for column in ["CS", *CORE_GIRO_COLUMNS] if column in filtered.columns]
     pieces = []
     for station, station_df in filtered.groupby("station", sort=True):
         station_df = station_df.sort_values("time_utc").drop_duplicates("time_utc", keep="last")
         station_df = station_df.set_index("time_utc")
         resampled = station_df[numeric_columns].resample(freq).mean()
+        # Preserve the actual measurement time separately from the interval label.
+        valid_fof2 = station_df["foF2"].notna()
+        observation_times = pd.Series(station_df.index, index=station_df.index).where(valid_fof2)
+        resampled["foF2_source_timestamp"] = observation_times.resample(freq).max()
         original_counts = station_df.resample(freq).size().reindex(resampled.index, fill_value=0)
         exclusive_end = infer_exclusive_period_end(station_df.index)
         if exclusive_end is not None:
@@ -295,7 +303,7 @@ def normalize_giro(df: pd.DataFrame, freq: str, min_cs: float, max_interpolate_g
         return pd.DataFrame()
     result = pd.concat(pieces, ignore_index=True)
     result["interval"] = make_interval(result["time_utc"], freq)
-    ordered = ["time_utc", "interval", "station", "had_original_giro_row", "giro_rows_in_interval", *numeric_columns]
+    ordered = ["time_utc", "interval", "station", "had_original_giro_row", "giro_rows_in_interval", "foF2_source_timestamp", *numeric_columns]
     return result[[column for column in ordered if column in result.columns]]
 
 
@@ -643,7 +651,7 @@ def write_report(
     excluded: list[str],
     active_stations: list[str],
     freq: str,
-    min_cs: float,
+    min_cs: float | None,
     max_interpolate_gap: str,
     station_files: list[Path],
     quality_files: list[Path],
@@ -655,7 +663,8 @@ def write_report(
         "# Time normalization report",
         "",
         f"- Selected time step: `{freq}`.",
-        f"- GIRO confidence filter: `CS >= {min_cs}`, `CS = -1`, or missing CS.",
+        ("- GIRO confidence filter: off (experimental; CS values retained)." if min_cs is None else
+         f"- GIRO confidence filter: `CS >= {min_cs}`, `CS = -1`, or missing CS."),
         "- GIRO normalization: measurements are aggregated inside each time interval; missing GIRO intervals stay empty.",
         "- Index normalization: GFZ/OMNI values are carried forward over their valid time intervals.",
         f"- Active stations used for training grid: {len(active_stations)}.",

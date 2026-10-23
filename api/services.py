@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import csv
+import math
+import json
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -13,7 +16,7 @@ STATION_METADATA_PATH = PROJECT_ROOT / "feature_engineering" / "configs" / "stat
 DEFAULT_FEATURE_DIR = PROJECT_ROOT / "features"
 DEFAULT_FEATURE_STATION_DIR = DEFAULT_FEATURE_DIR / "stations"
 TIME_COLUMNS = ("time_utc", "timestamp", "datetime", "time")
-IGNORED_FEATURE_COLUMNS = {"station", "interval"}
+IGNORED_FEATURE_COLUMNS = {"station", "interval", "foF2_source_timestamp", "_latest_fof2_timestamp"}
 
 
 class StationNotFoundError(ValueError):
@@ -65,6 +68,9 @@ def get_latest_features(station: str) -> FeatureResponse:
         raise FeatureNotFoundError(f"Feature table for station {station_info.code} was not found.")
 
     latest = _read_latest_row(path)
+    observation = _clean_text(latest.get("foF2_source_timestamp"))
+    fof2 = _to_float(latest.get("foF2"))
+    current_available = fof2 is not None and math.isfinite(fof2)
     time_column = _first_existing_column(latest, TIME_COLUMNS)
     if time_column is None or not latest.get(time_column):
         raise FeatureNotFoundError(f"Feature table for station {station_info.code} has no timestamp column.")
@@ -72,11 +78,19 @@ def get_latest_features(station: str) -> FeatureResponse:
     return FeatureResponse(
         station=station_info.code,
         timestamp=latest[time_column],
+        observation_timestamp=observation if current_available else None,
+        latest_fof2_timestamp=latest.get("_latest_fof2_timestamp"),
+        current_fof2_available=current_available,
         features=_extract_numeric_features(latest, time_column),
     )
 
 
 def _feature_file(station: str) -> Path:
+    workspace = os.getenv("IONOSCOPE_DATA_WORKSPACE")
+    if workspace:
+        root = Path(workspace)
+        state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+        return root / state["generation"] / "features" / "stations" / f"{station}_features.csv"
     station_file = DEFAULT_FEATURE_STATION_DIR / f"{station}_features.csv"
     if station_file.exists():
         return station_file
@@ -85,11 +99,16 @@ def _feature_file(station: str) -> Path:
 
 def _read_latest_row(path: Path) -> dict[str, str]:
     latest: dict[str, str] | None = None
+    last_observation = None
     with path.open("r", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             latest = row
+            value = _to_float(row.get("foF2"))
+            if value is not None and math.isfinite(value):
+                last_observation = _clean_text(row.get("foF2_source_timestamp"))
     if latest is None:
         raise FeatureNotFoundError(f"Feature table {path.name} is empty.")
+    latest["_latest_fof2_timestamp"] = last_observation
     return latest
 
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class HealthResponse(BaseModel):
@@ -28,6 +29,9 @@ class StationListResponse(BaseModel):
 class FeatureResponse(BaseModel):
     station: str
     timestamp: datetime
+    observation_timestamp: datetime | None = None
+    latest_fof2_timestamp: datetime | None = None
+    current_fof2_available: bool = False
     features: dict[str, float] = Field(default_factory=dict)
 
 
@@ -50,15 +54,28 @@ class DataAvailabilityResponse(BaseModel):
 
 
 class UpdateRequest(BaseModel):
-    station: str
+    station: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")
     start: datetime
     end: datetime
     sources: str = "all"
 
+    @field_validator("start", "end")
+    @classmethod
+    def normalize_time(cls, value: datetime) -> datetime:
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+    @field_validator("sources")
+    @classmethod
+    def validate_sources(cls, value: str) -> str:
+        sources = [item.strip().lower() for item in value.split(",")]
+        if not sources or any(item not in {"all", "giro", "gfz", "omni", "noaa"} for item in sources):
+            raise ValueError("Unsupported collection source.")
+        return ",".join(dict.fromkeys(sources))
+
 
 class UpdateTask(BaseModel):
     task_id: str
-    status: str
+    status: Literal["queued", "running", "completed", "failed"]
     station: str
     start: datetime
     end: datetime

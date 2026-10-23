@@ -1,5 +1,37 @@
 # Ionoscope Data
 
+## Deferred update queue
+
+Queue an update without running collection (run from this repository):
+
+```powershell
+python enqueue_update.py --station TR169 --start 2026-01-01T00:00:00Z --end 2026-01-02T00:00:00Z
+python run_update_tasks.py --limit 10
+python scripts/run_update_worker.py --interval-seconds 60 --limit 10
+```
+
+Alternatively, submit the same station, start, end and optional sources with
+`POST /api/v1/updates` (HTTP 202), then poll `GET /api/v1/updates/{task_id}`.
+The API only queues work; the worker runs the preparation pipeline separately.
+Statuses are `queued`, `running`, `completed`, `failed`.
+
+The local JSON queue is ordered by creation time and written atomically.
+An OS file lock permits one active worker per queue directory, including while
+the pipeline runs. Use a local filesystem shared by the API and worker.
+Do not run the direct preparation command concurrently against the same outputs.
+Failures retain their error text and do not block subsequent tasks. On restart,
+interrupted running tasks become failed; submit a new task to retry them.
+`--limit 0` processes all queued tasks. `--dry-run` previews commands without
+changing statuses or launching collection. Completed means the pipeline exited
+successfully; requested data coverage can be checked through the availability API.
+
+Run automated tests with:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m unittest discover -s tests -v
+```
+
 This repository contains the shared data layer for Ionoscope. It owns data
 collection, data preparation and feature engineering. Downstream ML and LLM
 projects should consume prepared outputs from this repository instead of
@@ -168,3 +200,81 @@ should be used.
 ```powershell
 python -m unittest discover -s tests
 ```
+
+## Observation provenance
+
+The latest-features endpoint keeps `timestamp` as the 15-minute grid label.
+`observation_timestamp` is the actual latest accepted foF2 measurement time
+within that interval, and is null when current foF2 is absent.
+`latest_fof2_timestamp` reports the last accepted foF2 time across the table,
+for diagnostics only. `current_fof2_available` reports whether the current row
+contains finite foF2. Previous measurements are never carried forward.
+Normalization persists `foF2_source_timestamp`; existing tables must be rebuilt
+from raw data to obtain verified provenance. Legacy tables do not invent it.
+
+## Incremental local updates
+
+Use a separate persistent workspace. For an initial import of an existing
+collector run, execute from ionoscope-data:
+
+```powershell
+python incremental_update.py --stations TR169 --workspace runs/tr169_incremental --seed-dir runs/live_20261023_182336/data --sources giro,gfz
+```
+
+Subsequent calls omit `--seed-dir`:
+
+```powershell
+python incremental_update.py --stations TR169 --workspace runs/tr169_incremental --sources giro,gfz
+```
+
+Without a seed, the first call downloads eight days. Later calls download from
+the previous query end minus `--overlap-hours` (default 48) through now, to
+recheck delayed/revised observations. This is download incrementality: cleaning
+and feature generation still rebuild over the accumulated local history.
+An empty source result does not delete previous records. Coverage gaps remain
+visible; an advanced query watermark does not prove source completeness.
+Use a larger overlap to recover older delayed observations.
+
+Batches are immutable; newer overlapping observations replace older ones without
+duplicating timestamps. NOAA energy channels and GFZ indices remain distinct.
+Each rebuild gets a new generation. `state.json` switches atomically only after
+successful preparation; a failed attempt leaves the active generation unchanged.
+The command shares the existing update-worker lock. Stations and source selection
+are fixed per workspace. `--prepare-only` rebuilds stored batches without network.
+No scheduler or forecast refresh is installed by this command.
+
+To serve the completed generation, start Data API with an absolute workspace path:
+
+```powershell
+$env:IONOSCOPE_DATA_WORKSPACE = (Resolve-Path runs/tr169_incremental).Path
+python -m uvicorn api.main:app --port 8001
+```
+
+The latest-features reader follows the committed generation on every request;
+its diagnostic output distinguishes grid time, actual foF2 time, and missing
+current foF2. Range and availability endpoints use the same committed generation.
+The example selects GIRO/GFZ explicitly because the earlier NOAA/OMNI problems
+remain unresolved; this selection does not establish full model-input coverage.
+
+## Experimental CS mode
+
+`--cs-filter off` disables row rejection by autoscaling confidence, retaining
+CS=0, low scores, unknown scores and manual scaling. It does not fill absent
+foF2, change the time grid, disable forecast freshness checks or permit forecasts
+without current foF2/provenance. Raw per-observation scores remain in immutable
+batches; the CS field of the normalized interval is the mean of included rows,
+not a probability or an individual foF2 quality guarantee.
+
+Rebuild the current incremental workspace without network calls:
+
+```powershell
+python incremental_update.py --stations TR169 --workspace runs/tr169_incremental --sources giro,gfz --prepare-only --cs-filter off
+```
+
+The incremental workspace remembers this mode for subsequent runs. Return to
+threshold filtering with `--cs-filter threshold --min-cs 50` (add `--prepare-only`
+when no download is needed). Previous generations remain available for comparison.
+The same switches are accepted by update_prepared_data.py and
+ data_preparation/normalize_time_grid.py; those commands default to threshold 50.
+Each normalization report records the applied filter. This experiment changes
+input coverage; it does not validate model quality with low-confidence inputs.

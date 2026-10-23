@@ -29,6 +29,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--normalized-dir", default="normalized", help="Normalized data output directory.")
     parser.add_argument("--features-dir", default="features", help="Feature table output directory used by the API.")
     parser.add_argument("--skip-collection", action="store_true", help="Reuse existing collected files.")
+    parser.add_argument("--cs-filter", choices=["threshold", "off"], default="threshold")
+    parser.add_argument("--min-cs", type=float, default=50.0)
     return parser.parse_args()
 
 
@@ -87,9 +89,12 @@ def main() -> None:
         "--time-config",
         "data_preparation/configs/time_normalization.json",
         "--split-by-station",
+        "--cs-filter", args.cs_filter,
+        "--min-cs", str(args.min_cs),
     ]
     if args.station_set:
         normalize_command.extend(["--station-set", args.station_set])
+        run_command(normalize_command)
     elif station_codes:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as handle:
             json.dump({"stations": station_codes}, handle)
