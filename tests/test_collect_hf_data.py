@@ -12,6 +12,45 @@ from unittest.mock import MagicMock
 
 
 class FetchPlatformTests(unittest.TestCase):
+    def test_parallel_event_writes_preserve_every_record(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import os
+        with tempfile.TemporaryDirectory(dir=os.getenv('IONOSCOPE_TEST_TMPDIR')) as directory:
+            path = Path(directory)/'events.jsonl'
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(lambda i: collector.append_jsonl(path, {'event': i}), range(800)))
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertEqual(len(rows), 800)
+        self.assertEqual({row['event'] for row in rows}, set(range(800)))
+
+    def test_queued_request_observes_cooldown_received_while_waiting(self):
+        clock = [100.0]
+        sleeps = []
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+            if len(sleeps) == 1:
+                collector._GIRO_BLOCKED_UNTIL = 166.0
+        with patch.object(collector, '_GIRO_NEXT_REQUEST', 106.0), \
+                patch.object(collector, '_GIRO_BLOCKED_UNTIL', 0.0), \
+                patch.object(collector.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(collector.time, 'sleep', side_effect=sleep):
+            collector.wait_for_giro_slot()
+            self.assertEqual(sleeps, [6.0, 60.0])
+            self.assertEqual(collector._GIRO_NEXT_REQUEST, 172.0)
+
+    def test_cooldown_waits_instead_of_failing_unattempted_stations(self):
+        clock = [100.0]
+        def sleep(seconds):
+            clock[0] += seconds
+        with patch.object(collector, '_GIRO_NEXT_REQUEST', 0.0), \
+                patch.object(collector, '_GIRO_BLOCKED_UNTIL', 160.0), \
+                patch.object(collector.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(collector.time, 'sleep', side_effect=sleep) as pause:
+            collector.wait_for_giro_slot()
+            pause.assert_called_once_with(60.0)
+            self.assertEqual(clock[0], 160.0)
+
     def test_rate_limit_is_not_retried_in_a_burst(self):
         from urllib.error import HTTPError
         error = HTTPError(collector.GIRO_DATA_URL, 429, 'Too Many Requests', {'Retry-After': '120'}, None)

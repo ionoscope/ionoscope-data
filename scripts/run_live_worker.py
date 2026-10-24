@@ -88,10 +88,37 @@ def run_cycle(args, stations: list[str]) -> list[dict]:
     return refresh_forecasts(args.api_url, stations, args.http_timeout)
 
 
+def select_candidates(path: Path, workspace: Path) -> list[str]:
+    """Catalog hints select work; only fresh foreground probes authorize serving."""
+    from collect_hf_data import parse_dt
+    now = datetime.now(UTC)
+    rows = {}
+    try:
+        registry = json.loads(path.read_text(encoding='utf-8'))
+        for row in registry['stations']:
+            checked = parse_dt(row.get('checked_at', registry['checked_at']))
+            if checked and 0 <= (now-checked).total_seconds() <= 7200:
+                rows[row['station']] = row
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    candidates = {code for code, row in rows.items() if row.get('active')}
+    for name, key in [('state.json', 'available_stations'), ('station_registry.json', 'active_stations')]:
+        try:
+            previous = json.loads((workspace/name).read_text(encoding='utf-8'))
+            for code in previous.get(key, []):
+                # An unavailable source is uncertainty, not confirmation of closure.
+                if code not in rows or rows[code].get('reason') == 'source_unavailable':
+                    candidates.add(code)
+        except (OSError, ValueError, TypeError):
+            pass
+    return sorted(candidates)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--stations', default='auto', help='auto checks all known GIRO stations each cycle')
     parser.add_argument('--max-station-age-minutes', type=float, default=60)
+    parser.add_argument('--candidate-registry', help='Background catalog snapshot; avoids a full scan in each live cycle')
     parser.add_argument('--workspace', default='/app/live_data')
     parser.add_argument('--api-url', default='http://api:8000')
     parser.add_argument('--sources', default='giro,gfz,noaa')
@@ -126,18 +153,29 @@ def main() -> None:
             try:
                 from station_activity import discover, write_metadata
                 from api.services import list_stations, STATION_METADATA_PATH
-                candidates = [station.code for station in list_stations()] if args.stations.lower() == 'auto' else stations
-                registry = discover(Path(args.workspace), candidates, args.max_station_age_minutes,
-                                    include_uncatalogued=args.stations.lower() == 'auto')
-                write_metadata(Path(args.workspace), STATION_METADATA_PATH, registry)
-                os.environ['IONOSCOPE_STATION_METADATA'] = str(Path(args.workspace) / 'station_metadata.csv')
-                stations = registry['active_stations']
-                status['active_stations'] = stations
-                status['excluded_stations'] = [row for row in registry['stations'] if not row['active']]
-                save_status(status_path, status)
-                if not stations:
-                    raise RuntimeError('No stations have recent verified foF2; no forecasts scheduled')
-                forecasts = run_cycle(args, stations)
+                from source_rate import foreground
+                with foreground(args.job_timeout+300):
+                    known = [station.code for station in list_stations()]
+                    selected = bool(args.candidate_registry) or args.stations.lower() != 'auto'
+                    candidates = (select_candidates(Path(args.candidate_registry), Path(args.workspace))
+                                  if args.candidate_registry and args.stations.lower() == 'auto'
+                                  else known if args.stations.lower() == 'auto' else stations)
+                    if not candidates:
+                        raise RuntimeError('Waiting for background catalog to find eligible station candidates')
+                    registry = discover(Path(args.workspace), candidates, args.max_station_age_minutes,
+                                        include_uncatalogued=args.stations.lower() == 'auto' and not selected,
+                                        selected_only=selected, known_codes=known)
+                    metadata_source = Path(args.workspace)/'station_metadata.csv'
+                    write_metadata(Path(args.workspace), metadata_source if metadata_source.exists() else STATION_METADATA_PATH, registry)
+                    os.environ['IONOSCOPE_STATION_METADATA'] = str(Path(args.workspace) / 'station_metadata.csv')
+                    stations = registry['active_stations']
+                    status['active_stations'] = stations
+                    status['excluded_stations'] = [row for row in registry['stations'] if not row['active']]
+                    status['candidate_count'] = len(candidates)
+                    save_status(status_path, status)
+                    if not stations:
+                        raise RuntimeError('No stations have recent verified foF2; no forecasts scheduled')
+                    forecasts = run_cycle(args, stations)
                 status.update(phase='ok', last_success=datetime.now(UTC).isoformat(),
                               successful_cycles=status.get('successful_cycles', 0) + 1,
                               consecutive_failures=0, forecasts=forecasts)
@@ -151,6 +189,9 @@ def main() -> None:
                     status['forecasts'] = exc.forecasts
                 print(f'Live cycle failed; retry in {delay}s: {exc}', flush=True)
             status['finished_at'] = datetime.now(UTC).isoformat()
+            status['duration_seconds'] = round(time.monotonic()-cycle_started, 3)
+            status['next_run_at'] = datetime.fromtimestamp(time.time() + (
+                max(0.1, delay-status['duration_seconds']) if status['phase'] == 'ok' else delay), UTC).isoformat()
             save_status(status_path, status)
             if args.once:
                 if status['phase'] != 'ok':

@@ -82,14 +82,23 @@ GIRO_DATA_URL = "https://giro.uml.edu/didbase/scaled.php"
 _GIRO_LOCK = threading.Lock()
 _GIRO_NEXT_REQUEST = 0.0
 _GIRO_BLOCKED_UNTIL = 0.0
+_LOG_LOCK = threading.Lock()
 
 
 def wait_for_giro_slot() -> None:
     global _GIRO_NEXT_REQUEST
+    if os.getenv('IONOSCOPE_GIRO_RATE_DIR'):
+        from source_rate import wait_for_slot
+        wait_for_slot()
+        return
     with _GIRO_LOCK:
-        if time.monotonic() < _GIRO_BLOCKED_UNTIL:
-            raise RuntimeError('GIRO rate limited requests; retry after cooldown')
-        time.sleep(max(0, _GIRO_NEXT_REQUEST - time.monotonic()))
+        # Recheck after sleeping: another request can receive HTTP 429 while
+        # this thread is already waiting for its normal request slot.
+        while True:
+            delay = max(_GIRO_NEXT_REQUEST, _GIRO_BLOCKED_UNTIL) - time.monotonic()
+            if delay <= 0:
+                break
+            time.sleep(delay)
         _GIRO_NEXT_REQUEST = time.monotonic() + 6.0
 
 
@@ -194,6 +203,8 @@ def fetch_url(url: str, *, data: dict[str, Any] | None, timeout: int, attempts: 
                     except (ValueError, TypeError, AttributeError):
                         cooldown = 60
                     _GIRO_BLOCKED_UNTIL = time.monotonic() + cooldown
+                    from source_rate import cooldown as shared_cooldown
+                    shared_cooldown(cooldown)
                 raise RuntimeError(f'Source rate limited requests (HTTP 429): {url}') from exc
             last_error = exc
             if attempt < attempts:
@@ -250,8 +261,11 @@ def write_json(path: Path, payload: Any) -> None:
 
 
 def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    # Windows-backed Docker bind mounts do not serialize independent append
+    # handles reliably. Keep open/write/close together across collector threads.
+    with _LOG_LOCK:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def make_records_payload(dataset: str, rows: list[dict[str, Any]]) -> dict[str, Any]:

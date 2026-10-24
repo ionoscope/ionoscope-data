@@ -5,6 +5,8 @@ import json
 import math
 import re
 import csv
+import os
+from contextlib import nullcontext
 from pathlib import Path
 
 from collect_hf_data import GIRO_DATA_URL, fetch_url, parse_dt, parse_giro_table, resolve_giro_stations
@@ -112,9 +114,10 @@ def check_station(station: str, now: datetime, max_age_minutes: float) -> dict:
     return {'station': station, **result}
 
 
-def discover(workspace: Path, catalog_codes: list[str], max_age_minutes: float = 60, include_uncatalogued: bool = False) -> dict:
+def discover(workspace: Path, catalog_codes: list[str], max_age_minutes: float = 60, include_uncatalogued: bool = False,
+             *, selected_only: bool = False, publish_progress: bool = False, known_codes: list[str] | None = None) -> dict:
     now = datetime.now(UTC)
-    available = set(resolve_giro_stations('all', timeout=15))
+    available = set(catalog_codes) if selected_only else set(resolve_giro_stations('all', timeout=15))
     candidates = sorted(available if include_uncatalogued else available.intersection(catalog_codes))
     if not candidates:
         raise RuntimeError('GIRO station discovery returned no known candidates')
@@ -138,25 +141,49 @@ def discover(workspace: Path, catalog_codes: list[str], max_age_minutes: float =
             reuse.append(row)
         else:
             pending.append(code)
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = [{**row, 'checked_at': now.isoformat()} for row in
-                   pool.map(lambda code: check_station(code, now, max_age_minutes), pending)]
+    def probe(code):
+        checked = datetime.now(UTC)
+        return {**check_station(code, checked, max_age_minutes), 'checked_at': checked.isoformat()}
+
+    def publish(rows):
+        registry = {'checked_at': datetime.now(UTC).isoformat(), 'max_age_minutes': max_age_minutes,
+                    'active_stations': sorted(row['station'] for row in rows if row['active']),
+                    'stations': sorted(rows, key=lambda row: row['station']),
+                    'uncatalogued_stations': sorted(available-set(catalog_codes))}
+        workspace.mkdir(parents=True, exist_ok=True)
+        temporary = workspace/'station_registry.tmp'
+        temporary.write_text(json.dumps(registry, indent=2), encoding='utf-8')
+        temporary.replace(workspace/'station_registry.json')
+        return registry
+
+    results = []
+    if publish_progress:
+        seed = dict(cached)
+        for code in (set(catalog_codes) | set(cached))-available:
+            seed[code] = {'station':code, 'active':False, 'reason':'not_in_current_giro_catalog',
+                          'diagnosis':'not_in_current_giro_catalog', 'last_observation':None,
+                          'checked_at':now.isoformat()}
+        if seed:
+            cached = seed
+            publish(list(seed.values()))
+    executor = nullcontext(None) if os.getenv('IONOSCOPE_GIRO_BACKGROUND') == '1' else ThreadPoolExecutor(max_workers=4)
+    with executor as pool:
+        for row in (map(probe, pending) if pool is None else pool.map(probe, pending)):
+            results.append(row)
+            if publish_progress:
+                updated = {r['station']: r for r in list(cached.values())+reuse+results}
+                publish(list(updated.values()))
     results += reuse
     for row in results:
-        if row['active'] and row['station'] not in catalog_codes and not row.get('metadata'):
+        if row['active'] and row['station'] not in (known_codes if known_codes is not None else catalog_codes) and not row.get('metadata'):
             row.update(active=False, reason='station_metadata_unavailable', diagnosis='station_metadata_unavailable')
     results += [{'station': code, 'active': False, 'reason': 'not_in_current_giro_catalog',
                  'diagnosis': 'not_in_current_giro_catalog',
                  'last_observation': None} for code in sorted(set(catalog_codes) - available)]
-    registry = {'checked_at': now.isoformat(), 'max_age_minutes': max_age_minutes,
-                'active_stations': sorted(row['station'] for row in results if row['active']),
-                'stations': sorted(results, key=lambda row: row['station']),
-                'uncatalogued_stations': sorted(available - set(catalog_codes))}
-    workspace.mkdir(parents=True, exist_ok=True)
-    temporary = workspace / 'station_registry.tmp'
-    temporary.write_text(json.dumps(registry, indent=2), encoding='utf-8')
-    temporary.replace(workspace / 'station_registry.json')
-    return registry
+    if selected_only:
+        results += [{**row, 'active': False, 'reason': 'not_selected'}
+                    for code, row in cached.items() if code not in available]
+    return publish(results)
 
 
 def write_metadata(workspace: Path, source: Path, registry: dict) -> None:

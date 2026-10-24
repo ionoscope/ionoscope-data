@@ -12,6 +12,46 @@ from scripts import run_live_worker as worker
 
 
 class LiveWorkerTests(unittest.TestCase):
+    def test_background_status_failure_does_not_break_live_status(self):
+        from fastapi.testclient import TestClient
+        from api.main import app
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            worker.save_status(root/'worker_status.json', {'phase':'ok','successful_cycles':3})
+            (root/'discovery').mkdir()
+            (root/'discovery/status.json').write_text('{broken')
+            with patch.dict('os.environ', IONOSCOPE_DATA_WORKSPACE=directory):
+                response=TestClient(app).get('/api/v1/live/status')
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(response.json()['phase'],'ok')
+            self.assertEqual(response.json()['discovery']['phase'],'unavailable')
+
+    def test_catalog_hints_never_override_confirmed_inactivity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'state.json').write_text(json.dumps({'available_stations': ['OLD00','RETRY','FALL0']}))
+            path = root/'catalog.json'
+            now = datetime.now(UTC).isoformat()
+            path.write_text(json.dumps({'checked_at': now, 'stations': [
+                {'station':'OLD00','active':False,'reason':'no_recent_verified_fof2'},
+                {'station':'RETRY','active':False,'reason':'source_unavailable'},
+                {'station':'NEW00','active':True,'reason':'fresh_fof2'}]}))
+            self.assertEqual(worker.select_candidates(path, root), ['FALL0','NEW00','RETRY'])
+
+    def test_missing_catalog_can_recheck_previous_stations_without_full_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'state.json').write_text(json.dumps({'available_stations':['TR169']}))
+            self.assertEqual(worker.select_candidates(root/'missing.json', root), ['TR169'])
+
+    def test_stale_catalog_cannot_add_unverified_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root/'catalog.json'
+            path.write_text(json.dumps({'checked_at':(datetime.now(UTC)-timedelta(hours=3)).isoformat(),
+                'stations':[{'station':'OLD00','active':True}]}))
+            self.assertEqual(worker.select_candidates(path, root), [])
+
     def test_station_expiring_during_preparation_is_not_forecast(self):
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory)/'state.json').write_text(json.dumps({'generation': 'generations/new', 'available_stations': ['GOOD0', 'OLD00']}))

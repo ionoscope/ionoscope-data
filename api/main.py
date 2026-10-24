@@ -53,7 +53,14 @@ def live_status() -> dict:
     if not path.exists():
         return {"phase": "starting"}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        status = json.loads(path.read_text(encoding="utf-8"))
+        discovery = Path(workspace)/'discovery/status.json'
+        if discovery.exists():
+            try:
+                status['discovery'] = json.loads(discovery.read_text(encoding='utf-8'))
+            except (ValueError, OSError):
+                status['discovery'] = {'phase': 'unavailable'}
+        return status
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=503, detail={"code": "live_status_unavailable",
                                                     "message": "Live worker status is unavailable"}) from exc

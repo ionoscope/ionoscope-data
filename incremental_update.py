@@ -156,6 +156,8 @@ def main() -> None:
             state["last_end"] = end.isoformat()
         if not batches:
             raise ValueError("No stored history; provide --seed-dir or allow collection")
+        from source_rate import release_priority
+        release_priority()
         generation = workspace / "generations" / uuid4().hex
         merge_batches(batches, generation / "data")
         prepare_command = [sys.executable, "update_prepared_data.py", "--skip-collection", "--stations", ",".join(stations),

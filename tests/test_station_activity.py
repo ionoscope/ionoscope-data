@@ -9,6 +9,75 @@ from station_activity import assess_rows, activity_map, discover
 
 
 class StationActivityTests(unittest.TestCase):
+    def test_removed_station_is_excluded_before_background_scan_completes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'station_registry.json').write_text(json.dumps({'checked_at':datetime.now(UTC).isoformat(),
+                'stations':[{'station':'OLD00','active':True,'reason':'fresh_fof2'}]}))
+            def probe(code, now, age):
+                published=json.loads((root/'station_registry.json').read_text())
+                old=next(row for row in published['stations'] if row['station']=='OLD00')
+                self.assertFalse(old['active'])
+                self.assertEqual(old['reason'],'not_in_current_giro_catalog')
+                return {'station':code,'active':False,'reason':'no_recent_verified_fof2','last_observation':None}
+            with patch('station_activity.resolve_giro_stations',return_value=['TR169']), \
+                    patch('station_activity.check_station',side_effect=probe):
+                discover(root,['OLD00','TR169'],publish_progress=True)
+
+    def test_background_publishes_candidates_before_full_scan_finishes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def probe(code, now, age):
+                if code == 'B0000':
+                    partial = json.loads((root/'station_registry.json').read_text())
+                    self.assertEqual(partial['active_stations'], ['A0000'])
+                return {'station':code,'active':True,'reason':'fresh_fof2','diagnosis':'fresh_fof2',
+                        'last_observation':(now-timedelta(minutes=15)).isoformat()}
+            with patch.dict('os.environ', IONOSCOPE_GIRO_BACKGROUND='1'), \
+                    patch('station_activity.resolve_giro_stations', return_value=['A0000','B0000']), \
+                    patch('station_activity.check_station', side_effect=probe):
+                result = discover(root, ['A0000','B0000'], publish_progress=True)
+            self.assertEqual(result['active_stations'], ['A0000','B0000'])
+
+    def test_selected_update_deactivates_unselected_previous_station(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'station_registry.json').write_text(json.dumps({'checked_at':datetime.now(UTC).isoformat(),
+                'stations':[{'station':'OLD00','active':True,'reason':'fresh_fof2',
+                             'last_observation':datetime.now(UTC).isoformat()}]}))
+            with patch('station_activity.check_station', return_value={'station':'TR169','active':False,
+                    'reason':'no_recent_verified_fof2','last_observation':None}):
+                result=discover(root,['TR169'],selected_only=True)
+            old=next(row for row in result['stations'] if row['station']=='OLD00')
+            self.assertFalse(old['active'])
+            self.assertEqual(old['reason'],'not_selected')
+
+    def test_selected_station_update_never_scans_catalog(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch('station_activity.resolve_giro_stations') as catalog, \
+                patch('station_activity.check_station', return_value={'station': 'TR169', 'active': False,
+                    'reason': 'no_recent_verified_fof2', 'diagnosis': 'low_cs', 'last_observation': None}) as probe:
+            result = discover(Path(directory), ['TR169'], selected_only=True)
+        catalog.assert_not_called()
+        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(result['active_stations'], [])
+
+    def test_each_probe_uses_its_actual_start_time_after_waiting_in_queue(self):
+        batch_start = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
+        probe_start = batch_start + timedelta(minutes=5)
+        finished = probe_start + timedelta(minutes=1)
+        with tempfile.TemporaryDirectory() as directory, \
+                patch('station_activity.datetime') as clock, \
+                patch('station_activity.resolve_giro_stations', return_value=['TR169']), \
+                patch('station_activity.check_station', return_value={
+                    'station': 'TR169', 'active': False, 'reason': 'no_recent_verified_fof2',
+                    'diagnosis': 'no_measurements_in_window', 'last_observation': None}) as probe:
+            clock.now.side_effect = [batch_start, probe_start, finished]
+            registry = discover(Path(directory), ['TR169'])
+        probe.assert_called_once_with('TR169', probe_start, 60)
+        self.assertEqual(registry['stations'][0]['checked_at'], probe_start.isoformat())
+        self.assertEqual(registry['checked_at'], finished.isoformat())
+
     def test_diagnosis_separates_time_quality_and_absence(self):
         cases = [([], 'no_measurements_in_window'), ([self.row(120)], 'stale_fof2'),
                  ([self.row(15, cs='20')], 'low_cs'), ([self.row(15, cs='-1')], 'missing_cs'),

@@ -2,14 +2,23 @@
 
 ## Automatic live updates
 
-The infrastructure Compose stack runs `scripts/run_live_worker.py`: every 15
-minutes it discovers active GIRO stations and collects their observations, accumulating history through
+The infrastructure Compose stack runs `scripts/run_live_worker.py`: every 5
+minutes it rechecks selected GIRO stations and collects their observations, accumulating history through
 `incremental_update.py`, atomically publishes prepared features, then refreshes
 the main API forecast/cache. Failures retry after 60 seconds. State and history
 persist in `live_data/`; Data API uses `IONOSCOPE_DATA_WORKSPACE=/app/live_data`.
+A separate `station-discovery` worker scans the full catalog on an hourly
+schedule, publishing candidates incrementally in `live_data/discovery/`.
+Candidates do not authorize forecasts: the live worker still checks recent
+physical foF2, CS and completed intervals. A shared rate gate enforces six-second
+spacing and HTTP 429 cooldown across processes; background discovery yields to
+live updates. A slow catalog scan does not block the foreground cycle.
 `GET /api/v1/live/status` reports progress and last success. See
-[deployment/README.md](deployment/README.md) and its `.env.example` for the
+[ionoscope-infrastructure](https://github.com/ionoscope/ionoscope-infrastructure)
+and its `.env.example` for the
 versioned Compose files, collection sources, windows and restart settings.
+On Windows, run `./start.ps1 -RestartDocker -NoBuild` from that sibling checkout
+to restart Docker Desktop and explicitly restore the Compose stack.
 
 ## Station audit workbook
 
