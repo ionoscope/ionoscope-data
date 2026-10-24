@@ -1,5 +1,24 @@
 # Ionoscope Data
 
+## Automatic live updates
+
+The infrastructure Compose stack runs `scripts/run_live_worker.py`: every 15
+minutes it discovers active GIRO stations and collects their observations, accumulating history through
+`incremental_update.py`, atomically publishes prepared features, then refreshes
+the main API forecast/cache. Failures retry after 60 seconds. State and history
+persist in `live_data/`; Data API uses `IONOSCOPE_DATA_WORKSPACE=/app/live_data`.
+`GET /api/v1/live/status` reports progress and last success. See
+[deployment/README.md](deployment/README.md) and its `.env.example` for the
+versioned Compose files, collection sources, windows and restart settings.
+
+## Station audit workbook
+
+[Station audit, 24 October 2026](docs/reports/station_audit_2026-10-24.xlsx)
+contains a summary and all 105 stations from the original catalog. It preserves
+the reported snapshot at 10:14 UTC: 30 stations were not verified because GIRO
+limited requests. These are not classified as permanently inactive. Blank
+observations are distinct from zero counts. Later live checks may differ.
+
 ## Deferred update queue
 
 Queue an update without running collection (run from this repository):
@@ -278,3 +297,28 @@ The same switches are accepted by update_prepared_data.py and
  data_preparation/normalize_time_grid.py; those commands default to threshold 50.
 Each normalization report records the applied filter. This experiment changes
 input coverage; it does not validate model quality with low-confidence inputs.
+
+
+## API interval and validation behavior
+
+Latest features use the most recent COMPLETED 15-minute interval (UTC), selected
+by time rather than CSV row order. `timestamp` labels interval start and
+`source_interval_end` labels interval end. A still-open interval is not used.
+Missing/nonfinite feature values and future target columns are not serialized
+as model inputs. Range responses also expose interval end and observation time.
+Timezone-less range boundaries are interpreted as UTC; explicit offsets are
+normalized before comparisons. Availability refers to prepared time coverage,
+not a guarantee that every observation is present.
+
+Station listings recheck prepared-file availability. An uninitialized incremental
+workspace is treated as missing data instead of crashing. Unknown stations and
+missing feature tables both return 404 with distinct detail codes
+`station_not_found` and `features_unavailable`.
+`IONOSCOPE_FEATURES_DIR` optionally selects a prepared feature root containing
+`stations/`; an incremental workspace takes precedence when configured.
+
+
+`IONOSCOPE_UPDATE_TASK_DIR` optionally selects the queue directory (default:
+update_tasks/). This permits isolated API checks without using an operator queue.
+Corrupt task files and storage failures return HTTP 503 with
+`detail.code = "data_store_unavailable"`. Error responses are documented in OpenAPI.

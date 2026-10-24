@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from .services import TIME_COLUMNS, _extract_numeric_features, _feature_file, _first_existing_column
+from .services import TIME_COLUMNS, _extract_numeric_features, _feature_file, _first_existing_column, parse_timestamp
+from datetime import timedelta
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ def has_feature_range(station: str, start: datetime, end: datetime) -> bool:
 
 
 def read_feature_range(station: str, start: datetime, end: datetime) -> list[dict[str, object]]:
+    start, end = parse_timestamp(start.isoformat()), parse_timestamp(end.isoformat())
     station_code = station.upper()
     if not has_feature_range(station_code, start, end):
         raise DataUnavailableError(f"Prepared features for {station_code} do not cover the requested period.")
@@ -69,14 +71,21 @@ def read_feature_range(station: str, start: datetime, end: datetime) -> list[dic
             timestamp = parse_datetime(row.get(time_column, ""))
             if timestamp is None or timestamp < start or timestamp > end:
                 continue
+            features = _extract_numeric_features(row, time_column)
+            observation = parse_datetime(row.get("foF2_source_timestamp", ""))
+            if observation and not timestamp <= observation < timestamp + timedelta(minutes=15):
+                observation = None
             records.append(
                 {
                     "station": station_code,
                     "timestamp": timestamp,
-                    "features": _extract_numeric_features(row, time_column),
+                    "source_interval_end": timestamp + timedelta(minutes=15),
+                    "observation_timestamp": observation if "foF2" in features else None,
+                    "current_fof2_available": "foF2" in features,
+                    "features": features,
                 }
             )
-    return records
+    return sorted(records, key=lambda record: record["timestamp"])
 
 
 def parse_datetime(value: str) -> datetime | None:
@@ -86,6 +95,6 @@ def parse_datetime(value: str) -> datetime | None:
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(text)
+        return parse_timestamp(text)
     except ValueError:
         return None

@@ -12,10 +12,14 @@ from .schemas import UpdateRequest, UpdateTask
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-TASK_DIR = PROJECT_ROOT / "update_tasks"
+TASK_DIR = Path(os.getenv("IONOSCOPE_UPDATE_TASK_DIR", str(PROJECT_ROOT / "update_tasks")))
 
 
 class UpdateTaskNotFoundError(ValueError):
+    pass
+
+
+class UpdateTaskStoreError(RuntimeError):
     pass
 
 
@@ -53,7 +57,12 @@ def get_update_task(task_id: str) -> UpdateTask:
     path = _task_path(task_id)
     if not path.exists():
         raise UpdateTaskNotFoundError(f"Update task {task_id} was not found.")
-    return UpdateTask.model_validate(json.loads(path.read_text(encoding="utf-8")))
+    try:
+        return UpdateTask.model_validate(json.loads(path.read_text(encoding="utf-8")))
+    except FileNotFoundError as exc:
+        raise UpdateTaskNotFoundError(f"Update task {task_id} was not found.") from exc
+    except (OSError, ValueError) as exc:
+        raise UpdateTaskStoreError("Update task could not be read") from exc
 
 
 def mark_task_running(task: UpdateTask) -> UpdateTask:

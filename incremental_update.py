@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import shutil
 import sys
 from datetime import UTC, datetime, timedelta
@@ -74,22 +75,36 @@ def merge_batches(batches: list[Path], destination: Path) -> None:
         path.write_text("\n".join(records[key] for key in sorted(records)) + "\n", encoding="utf-8")
 
 
+def validate_generation(generation: Path, stations: list[str], end: datetime) -> None:
+    """Never replace working features with an empty or stale collection."""
+    from api.services import _read_latest_row
+    for station in stations:
+        row = _read_latest_row(generation / 'features' / 'stations' / f'{station}_features.csv')
+        observation = parse_dt(row.get('foF2_source_timestamp'))
+        value = row.get('foF2')
+        if (not observation or value in (None, '') or not math.isfinite(float(value))
+                or not timedelta(0) <= end - observation <= timedelta(hours=2)):
+            raise ValueError(f'No recent verified foF2 for {station}; retaining previous generation')
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stations", required=True, help="Comma-separated stations; fixed for this workspace.")
+    parser.add_argument("--dynamic-stations", action="store_true", help="Allow the operational station set to change.")
     parser.add_argument("--workspace", default="live_data")
     parser.add_argument("--seed-dir", help="Existing collector output to use as initial history (first run only).")
     parser.add_argument("--config", default="config.toml")
     parser.add_argument("--sources", default="all", help="Keep the same source selection for this workspace.")
     parser.add_argument("--end", help="UTC end; defaults to now.")
     parser.add_argument("--overlap-hours", type=float, default=48, help="Recheck delayed/revised records; default 48h.")
+    parser.add_argument("--initial-hours", type=float, default=192, help="History to collect on first run.")
     parser.add_argument("--prepare-only", action="store_true", help="Rebuild from stored history without network calls.")
     parser.add_argument("--cs-filter", choices=["threshold", "off"],
                         help="Defaults to saved mode, or threshold for a new workspace.")
     parser.add_argument("--min-cs", type=float, help="Defaults to saved cutoff, or 50.")
     args = parser.parse_args()
-    if args.overlap_hours <= 0:
-        parser.error("--overlap-hours must be positive")
+    if args.overlap_hours <= 0 or args.initial_hours <= 0:
+        parser.error("Collection windows must be positive")
     stations = sorted({s.strip().upper() for s in args.stations.split(",") if s.strip()})
     if not stations or any(not s.replace("_", "").replace("-", "").isalnum() for s in stations):
         parser.error("Station codes must contain only letters, digits, underscores or hyphens")
@@ -103,7 +118,7 @@ def main() -> None:
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {
             "stations": stations, "sources": args.sources, "batches": [], "last_end": None,
         }
-        if state["stations"] != stations or state["sources"] != args.sources:
+        if (state["stations"] != stations and not args.dynamic_stations) or state["sources"] != args.sources:
             raise ValueError("Use a separate workspace when changing stations or sources")
         cs_filter = args.cs_filter or state.get("cs_filter", "threshold")
         min_cs = args.min_cs if args.min_cs is not None else state.get("min_cs", 50.0)
@@ -128,6 +143,8 @@ def main() -> None:
             raise ValueError("End must not move the collection watermark backwards")
         if not args.prepare_only:
             start = collection_start(end, utc(state["last_end"]) if state["last_end"] else None, args.overlap_hours)
+            if not state["last_end"]:
+                start = end - timedelta(hours=args.initial_hours)
             batch = workspace / "batches" / (end.strftime("%Y%m%dT%H%M%S") + "_" + uuid4().hex[:8])
             batch.mkdir(parents=True)
             config = batch / "collection.toml"
@@ -141,10 +158,33 @@ def main() -> None:
             raise ValueError("No stored history; provide --seed-dir or allow collection")
         generation = workspace / "generations" / uuid4().hex
         merge_batches(batches, generation / "data")
-        run_command([sys.executable, "update_prepared_data.py", "--skip-collection", "--stations", ",".join(stations),
+        prepare_command = [sys.executable, "update_prepared_data.py", "--skip-collection", "--stations", ",".join(stations),
                      "--cs-filter", cs_filter, "--min-cs", str(min_cs),
                      "--data-dir", str(generation / "data"), "--cleaned-dir", str(generation / "cleaned"),
-                     "--normalized-dir", str(generation / "normalized"), "--features-dir", str(generation / "features")])
+                     "--normalized-dir", str(generation / "normalized"), "--features-dir", str(generation / "features")]
+        if args.dynamic_stations:
+            selection = generation / 'station_set.json'
+            selection.write_text(json.dumps({'stations': stations}), encoding='utf-8')
+            # Build existing normalized stations together; a missing station must
+            # not abort preparation for all the others.
+            prepare_command.extend(['--station-set', str(selection)])
+        run_command(prepare_command)
+        usable = stations
+        if not args.prepare_only:
+            if args.dynamic_stations:
+                usable = []
+                for station in stations:
+                    try:
+                        validate_generation(generation, [station], end)
+                        usable.append(station)
+                    except (OSError, ValueError) as exc:
+                        print(f'Skipping {station}: {exc}', flush=True)
+                if not usable:
+                    raise ValueError('No stations have usable current features; retaining previous generation')
+            else:
+                validate_generation(generation, stations, end)
+        state['stations'] = stations
+        state['available_stations'] = usable
         state["batches"] = [str(batch.relative_to(workspace)) for batch in batches]
         state["generation"] = str(generation.relative_to(workspace))
         state["cs_filter"] = cs_filter
@@ -156,7 +196,7 @@ def main() -> None:
         from api import services
         services.DEFAULT_FEATURE_DIR = generation / "features"
         services.DEFAULT_FEATURE_STATION_DIR = generation / "features/stations"
-        for station in stations:
+        for station in usable:
             latest = services.get_latest_features(station)
             payload = latest.model_dump(mode="json", exclude={"features"})
             print(json.dumps(payload), flush=True)

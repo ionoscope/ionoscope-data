@@ -13,12 +13,13 @@ import sys
 import time
 import tomllib
 import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
+from urllib.error import URLError, HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -78,6 +79,18 @@ TIME_KEYS = (
 USER_AGENT = "giro-noaa-hf-collector/1.0 (+research data preprocessing)"
 GIRO_FORM_URL = "https://giro.uml.edu/didbase/scaled.php?tdsourcetag=s_pctim_aiomsg"
 GIRO_DATA_URL = "https://giro.uml.edu/didbase/scaled.php"
+_GIRO_LOCK = threading.Lock()
+_GIRO_NEXT_REQUEST = 0.0
+_GIRO_BLOCKED_UNTIL = 0.0
+
+
+def wait_for_giro_slot() -> None:
+    global _GIRO_NEXT_REQUEST
+    with _GIRO_LOCK:
+        if time.monotonic() < _GIRO_BLOCKED_UNTIL:
+            raise RuntimeError('GIRO rate limited requests; retry after cooldown')
+        time.sleep(max(0, _GIRO_NEXT_REQUEST - time.monotonic()))
+        _GIRO_NEXT_REQUEST = time.monotonic() + 6.0
 
 
 @dataclass(frozen=True)
@@ -157,8 +170,10 @@ def init_paths(config: dict[str, Any], args: argparse.Namespace) -> Paths:
 
 
 def fetch_url(url: str, *, data: dict[str, Any] | None, timeout: int, attempts: int = 3) -> bytes:
+    global _GIRO_BLOCKED_UNTIL
     body = urlencode(data, doseq=True).encode("utf-8") if data else None
-    if "giro.uml.edu" in url:
+    if "giro.uml.edu" in url and os.name == "nt":
+        wait_for_giro_slot()
         return fetch_url_with_powershell(url, body=body, timeout=timeout)
     headers = {"User-Agent": USER_AGENT}
     if body:
@@ -166,14 +181,24 @@ def fetch_url(url: str, *, data: dict[str, Any] | None, timeout: int, attempts: 
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
+            if 'giro.uml.edu' in url:
+                wait_for_giro_slot()
             request = Request(url, data=body, headers=headers)
             with urlopen(request, timeout=timeout) as response:
                 return response.read()
         except (TimeoutError, URLError, OSError) as exc:
+            if isinstance(exc, HTTPError) and exc.code == 429:
+                if 'giro.uml.edu' in url:
+                    try:
+                        cooldown = max(60, float(exc.headers.get('Retry-After', 60)))
+                    except (ValueError, TypeError, AttributeError):
+                        cooldown = 60
+                    _GIRO_BLOCKED_UNTIL = time.monotonic() + cooldown
+                raise RuntimeError(f'Source rate limited requests (HTTP 429): {url}') from exc
             last_error = exc
             if attempt < attempts:
                 time.sleep(2 * attempt)
-    if "giro.uml.edu" in url:
+    if "giro.uml.edu" in url and os.name == "nt":
         return fetch_url_with_powershell(url, body=body, timeout=timeout)
     raise RuntimeError(f"Failed to fetch {url}: {last_error}") from last_error
 
@@ -313,8 +338,16 @@ def collect_noaa(config: dict[str, Any], paths: Paths, timeout: int) -> list[dic
                     row = {f"col_{idx}": value for idx, value in enumerate(row)}
             if not isinstance(row, dict):
                 continue
+            # RTSW publishes multiple spacecraft; use the operational primary.
+            if row.get("active") is False:
+                continue
             normalized = {"source": "NOAA_SWPC", "product": name}
             normalized.update(row)
+            if "proton_speed" in row:
+                normalized["speed"] = row["proton_speed"]
+            if "proton_density" in row:
+                normalized["density"] = row["proton_density"]
+            normalized["source"] = "NOAA_SWPC"
             normalized["time_utc"] = first_time(row)
             records.append(normalized)
     return records
@@ -537,7 +570,21 @@ def iter_time_windows(start: datetime, end: datetime, chunk_days: float) -> list
     return windows
 
 
-def collect_giro(
+def collect_giro(config: dict[str, Any], paths: Paths, start: datetime, end: datetime, timeout: int) -> list[dict[str, Any]]:
+    from concurrent.futures import ThreadPoolExecutor
+    giro = config.get('giro', {})
+    workers = max(1, min(4, int(giro.get('workers', 1))))
+    if workers == 1 or not giro.get('enabled', True):
+        return _collect_giro_serial(config, paths, start, end, timeout)
+    stations = resolve_giro_stations(giro.get('stations', []), timeout, paths)
+    def collect_station(station):
+        station_config = {**config, 'giro': {**giro, 'stations': [station], 'workers': 1}}
+        return _collect_giro_serial(station_config, paths, start, end, timeout)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return [row for rows in pool.map(collect_station, stations) for row in rows]
+
+
+def _collect_giro_serial(
     config: dict[str, Any],
     paths: Paths,
     start: datetime,

@@ -76,6 +76,19 @@ class UpdateTests(unittest.TestCase):
         with self.assertRaises(queue.UpdateTaskNotFoundError):
             queue.get_update_task("../config")
 
+    def test_corrupted_task_returns_controlled_storage_error(self):
+        task = self.create()
+        (queue.TASK_DIR / (task.task_id + '.json')).write_text('{broken')
+        response = TestClient(app).get(f'/api/v1/updates/{task.task_id}')
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()['detail']['code'], 'data_store_unavailable')
+
+    def test_write_error_returns_service_unavailable(self):
+        with patch('api.main.get_station'), patch.object(queue, 'save_update_task', side_effect=OSError('disk full')):
+            response = TestClient(app).post('/api/v1/updates', json={
+                'station': 'TR169', 'start': '2025-01-01', 'end': '2025-01-02'})
+        self.assertEqual(response.status_code, 503)
+
     def test_api_queues_without_processing(self):
         client = TestClient(app)
         with patch("api.main.get_station"), patch.object(worker.subprocess, "run") as run:

@@ -8,6 +8,34 @@ from pathlib import Path
 from unittest.mock import patch
 
 import collect_hf_data as collector
+from unittest.mock import MagicMock
+
+
+class FetchPlatformTests(unittest.TestCase):
+    def test_rate_limit_is_not_retried_in_a_burst(self):
+        from urllib.error import HTTPError
+        error = HTTPError(collector.GIRO_DATA_URL, 429, 'Too Many Requests', {'Retry-After': '120'}, None)
+        with patch.object(collector.os, 'name', 'posix'), \
+                patch.object(collector, 'wait_for_giro_slot'), \
+                patch.object(collector, '_GIRO_BLOCKED_UNTIL', 0), \
+                patch.object(collector, 'urlopen', side_effect=error) as request:
+            with self.assertRaises(RuntimeError):
+                collector.fetch_url(collector.GIRO_DATA_URL, data=None, timeout=5)
+            request.assert_called_once()
+            self.assertGreater(collector._GIRO_BLOCKED_UNTIL, 0)
+
+    def test_giro_on_linux_uses_http_without_powershell(self):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b"GIRO response"
+        with patch.object(collector.os, "name", "posix"), patch.object(collector, "urlopen", return_value=response) as fetch, patch.object(collector, "fetch_url_with_powershell") as powershell:
+            self.assertEqual(collector.fetch_url(collector.GIRO_DATA_URL, data={"location": "TR169"}, timeout=5), b"GIRO response")
+        fetch.assert_called_once()
+        powershell.assert_not_called()
+
+    def test_giro_on_windows_preserves_powershell_transport(self):
+        with patch.object(collector.os, "name", "nt"), patch.object(collector, "fetch_url_with_powershell", return_value=b"ok") as powershell:
+            self.assertEqual(collector.fetch_url(collector.GIRO_DATA_URL, data=None, timeout=5), b"ok")
+        powershell.assert_called_once()
 
 
 def assert_payload_shape(test_case, payload, dataset, count):
@@ -29,6 +57,21 @@ class JsonOutputTests(unittest.TestCase):
 
 
 class ParserTests(unittest.TestCase):
+    def test_rtsw_uses_active_spacecraft_and_maps_plasma_fields(self):
+        config = {"noaa": {"endpoints": [{"name": "solar_wind_plasma_2_hour", "url": "https://example.test/wind"}]}}
+        raw = json.dumps([
+            {"time_tag": "2026-10-24T08:00:00", "active": False, "source": "IMAP", "proton_speed": 100},
+            {"time_tag": "2026-10-24T08:00:00", "active": True, "source": "ACE", "proton_speed": 400, "proton_density": 5},
+        ]).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = collector.init_paths({"run": {}}, argparse.Namespace(output_dir=tmp))
+            with patch.object(collector, "fetch_url", return_value=raw):
+                rows = collector.collect_noaa(config, paths, timeout=1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "NOAA_SWPC")
+        self.assertEqual(rows[0]["speed"], 400)
+        self.assertEqual(rows[0]["density"], 5)
+
     def test_collect_noaa_normalizes_table_json(self):
         config = {
             "noaa": {

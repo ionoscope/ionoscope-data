@@ -1,0 +1,99 @@
+services:
+  data-api:
+    restart: unless-stopped
+    environment:
+      IONOSCOPE_DATA_WORKSPACE: /app/live_data
+    build:
+      context: ..
+    ports:
+      - "8001:8001"
+    volumes:
+      - ../live_data:/app/live_data
+      - ../data:/app/data
+      - ../cleaned:/app/cleaned
+      - ../normalized:/app/normalized
+      - ../features:/app/features
+      - ../update_tasks:/app/update_tasks
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  ml-service:
+    restart: unless-stopped
+    build:
+      context: ../../ionoscope-ml-service
+    ports:
+      - "8002:8002"
+    volumes:
+      - ../../ionoscope-ml-service/production_models:/app/production_models:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  api:
+    restart: unless-stopped
+    build:
+      context: ../../ionoscope-api
+    environment:
+      IONOSCOPE_DATA_API_URL: http://data-api:8001
+      IONOSCOPE_REQUIRE_ACTIVE_STATIONS: "true"
+      IONOSCOPE_ML_SERVICE_URL: http://ml-service:8002
+      IONOSCOPE_FORECAST_CACHE_DIR: /app/forecast_cache
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../../ionoscope-api/forecast_cache:/app/forecast_cache
+    depends_on:
+      data-api:
+        condition: service_healthy
+      ml-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  data-update-worker:
+    restart: unless-stopped
+    build:
+      context: ..
+    command: ["python", "-u", "scripts/run_live_worker.py", "--stations", "${IONOSCOPE_LIVE_STATIONS:-auto}", "--sources", "${IONOSCOPE_LIVE_SOURCES:-giro,gfz,noaa}", "--interval-seconds", "${IONOSCOPE_LIVE_INTERVAL_SECONDS:-900}", "--retry-seconds", "${IONOSCOPE_LIVE_RETRY_SECONDS:-60}", "--initial-hours", "${IONOSCOPE_LIVE_INITIAL_HOURS:-24}", "--overlap-hours", "${IONOSCOPE_LIVE_OVERLAP_HOURS:-3}"]
+    volumes:
+      - ../live_data:/app/live_data
+      - ../data:/app/data
+      - ../cleaned:/app/cleaned
+      - ../normalized:/app/normalized
+      - ../features:/app/features
+      - ../update_tasks:/app/update_tasks
+    depends_on:
+      data-api:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  forecast-refresh-worker:
+    restart: unless-stopped
+    build:
+      context: ../../ionoscope-api
+    command:
+      [
+        "python",
+        "scripts/run_forecast_refresh_worker.py",
+        "--api-url",
+        "http://api:8000",
+        "--interval-seconds",
+        "${IONOSCOPE_FORECAST_REFRESH_INTERVAL_SECONDS:-900}",
+        "--timeout",
+        "${IONOSCOPE_FORECAST_REFRESH_TIMEOUT_SECONDS:-30}",
+        "--run-on-start"
+      ]
+    volumes:
+      - ../../ionoscope-api/forecast_cache:/app/forecast_cache
+    depends_on:
+      api:
+        condition: service_healthy

@@ -13,6 +13,8 @@ forecast_cache
 production_models/*.joblib
 runs
 live_data
+docs/reports
+deployment
 output
 evaluation
 data

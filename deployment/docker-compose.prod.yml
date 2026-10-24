@@ -1,0 +1,151 @@
+services:
+  gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${IONOSCOPE_HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/ionoscope.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - public
+      - backend
+
+  data-api:
+    image: ${IONOSCOPE_DATA_IMAGE:-ionoscope-data:latest}
+    restart: unless-stopped
+    environment:
+      IONOSCOPE_DATA_WORKSPACE: /app/live_data
+    volumes:
+      - data_live:/app/live_data
+      - data_raw:/app/data
+      - data_cleaned:/app/cleaned
+      - data_normalized:/app/normalized
+      - data_features:/app/features
+      - data_update_tasks:/app/update_tasks
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - backend
+
+  data-update-worker:
+    image: ${IONOSCOPE_DATA_IMAGE:-ionoscope-data:latest}
+    restart: unless-stopped
+    command:
+      [
+        "python",
+        "scripts/run_live_worker.py",
+        "--stations",
+        "${IONOSCOPE_LIVE_STATIONS:-auto}",
+        "--sources",
+        "${IONOSCOPE_LIVE_SOURCES:-giro,gfz,noaa}",
+        "--interval-seconds",
+        "${IONOSCOPE_LIVE_INTERVAL_SECONDS:-900}",
+        "--retry-seconds",
+        "${IONOSCOPE_LIVE_RETRY_SECONDS:-60}",
+        "--initial-hours",
+        "${IONOSCOPE_LIVE_INITIAL_HOURS:-24}",
+        "--overlap-hours",
+        "${IONOSCOPE_LIVE_OVERLAP_HOURS:-3}"
+      ]
+    volumes:
+      - data_live:/app/live_data
+      - data_raw:/app/data
+      - data_cleaned:/app/cleaned
+      - data_normalized:/app/normalized
+      - data_features:/app/features
+      - data_update_tasks:/app/update_tasks
+    depends_on:
+      data-api:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - backend
+      - egress
+
+  ml-service:
+    image: ${IONOSCOPE_ML_IMAGE:-ionoscope-ml-service:latest}
+    restart: unless-stopped
+    volumes:
+      - ml_models:/app/production_models:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - backend
+
+  api:
+    image: ${IONOSCOPE_API_IMAGE:-ionoscope-api:latest}
+    restart: unless-stopped
+    environment:
+      IONOSCOPE_DATA_API_URL: http://data-api:8001
+      IONOSCOPE_REQUIRE_ACTIVE_STATIONS: "true"
+      IONOSCOPE_ML_SERVICE_URL: http://ml-service:8002
+      IONOSCOPE_FORECAST_CACHE_DIR: /app/forecast_cache
+      IONOSCOPE_FORECAST_STALE_AFTER_MINUTES: ${IONOSCOPE_FORECAST_STALE_AFTER_MINUTES:-30}
+      IONOSCOPE_FORECAST_EXPIRE_AFTER_MINUTES: ${IONOSCOPE_FORECAST_EXPIRE_AFTER_MINUTES:-120}
+      IONOSCOPE_REQUEST_TIMEOUT_SECONDS: ${IONOSCOPE_REQUEST_TIMEOUT_SECONDS:-10}
+    volumes:
+      - forecast_cache:/app/forecast_cache
+    depends_on:
+      data-api:
+        condition: service_healthy
+      ml-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - backend
+
+  forecast-refresh-worker:
+    image: ${IONOSCOPE_API_IMAGE:-ionoscope-api:latest}
+    restart: unless-stopped
+    command:
+      [
+        "python",
+        "scripts/run_forecast_refresh_worker.py",
+        "--api-url",
+        "http://api:8000",
+        "--interval-seconds",
+        "${IONOSCOPE_FORECAST_REFRESH_INTERVAL_SECONDS:-900}",
+        "--timeout",
+        "${IONOSCOPE_FORECAST_REFRESH_TIMEOUT_SECONDS:-30}",
+        "--run-on-start"
+      ]
+    volumes:
+      - forecast_cache:/app/forecast_cache
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - backend
+
+networks:
+  public:
+  egress:
+  backend:
+    internal: true
+
+volumes:
+  data_live:
+  data_raw:
+  data_cleaned:
+  data_normalized:
+  data_features:
+  data_update_tasks:
+  forecast_cache:
+  ml_models:

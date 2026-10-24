@@ -7,6 +7,7 @@ output_dir = "data"
 timeout_seconds = 90
 
 [giro]
+workers = 4
 enabled = true
 # Examples: MO155 Moscow-Parus-A, BC840 Boulder, AT138 Athens, DB049 Dourbes.
 # Use "all" to query every station listed in the GIRO FastChar form.
@@ -28,8 +29,8 @@ continue_on_error = true
 # Historical Kp/ap/Ap/F10.7 are collected from GFZ below.
 endpoints = [
   { name = "goes_primary_xrays_3_day", url = "https://services.swpc.noaa.gov/json/goes/primary/xrays-3-day.json" },
-  { name = "solar_wind_mag_2_hour", url = "https://services.swpc.noaa.gov/products/solar-wind/mag-2-hour.json" },
-  { name = "solar_wind_plasma_2_hour", url = "https://services.swpc.noaa.gov/products/solar-wind/plasma-2-hour.json" }
+  { name = "solar_wind_mag_2_hour", url = "https://services.swpc.noaa.gov/json/rtsw/rtsw_mag_1m.json" },
+  { name = "solar_wind_plasma_2_hour", url = "https://services.swpc.noaa.gov/json/rtsw/rtsw_wind_1m.json" }
 ]
 
 [gfz]

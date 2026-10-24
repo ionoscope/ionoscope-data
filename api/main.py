@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
+import os
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from .catalog import DataUnavailableError, get_feature_catalog_entry, read_feature_range
 from .schemas import (
     DataAvailabilityResponse,
+    ErrorResponse,
     FeatureResponse,
     FeatureSeriesResponse,
     HealthResponse,
@@ -15,20 +20,43 @@ from .schemas import (
     UpdateRequest,
     UpdateTask,
 )
-from .services import FeatureNotFoundError, StationNotFoundError, get_latest_features, get_station, list_stations
-from .update_tasks import UpdateTaskNotFoundError, create_update_task, get_update_task
+from .services import FeatureNotFoundError, StationNotFoundError, get_latest_features, get_station, list_stations, parse_timestamp
+from .update_tasks import UpdateTaskNotFoundError, UpdateTaskStoreError, create_update_task, get_update_task
 
 
 app = FastAPI(
     title="IonoScope Data API",
     version="0.1.0",
     description="Prepared station metadata and feature access for IonoScope services.",
+    responses={code: {"model": ErrorResponse} for code in (400, 404, 409, 503)},
 )
+
+
+@app.exception_handler(OSError)
+@app.exception_handler(UpdateTaskStoreError)
+async def storage_unavailable(request, exc):
+    return JSONResponse(status_code=503, content={"detail": {
+        "code": "data_store_unavailable", "message": "Prepared data or update task storage is unavailable"}})
 
 
 @app.get("/health", response_model=HealthResponse, tags=["health"])
 def health() -> HealthResponse:
     return HealthResponse(status="ok", service="ionoscope-data")
+
+
+@app.get("/api/v1/live/status", tags=["updates"])
+def live_status() -> dict:
+    workspace = os.getenv("IONOSCOPE_DATA_WORKSPACE")
+    if not workspace:
+        return {"phase": "disabled"}
+    path = Path(workspace) / "worker_status.json"
+    if not path.exists():
+        return {"phase": "starting"}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=503, detail={"code": "live_status_unavailable",
+                                                    "message": "Live worker status is unavailable"}) from exc
 
 
 @app.get("/api/v1/stations", response_model=StationListResponse, tags=["stations"])
@@ -41,7 +69,7 @@ def station_detail(station: str) -> Station:
     try:
         return get_station(station)
     except StationNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail={"code": "station_not_found", "message": str(exc)}) from exc
 
 
 @app.get("/api/v1/features/{station}/latest", response_model=FeatureResponse, tags=["features"])
@@ -49,9 +77,9 @@ def latest_features(station: str) -> FeatureResponse:
     try:
         return get_latest_features(station)
     except StationNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail={"code": "station_not_found", "message": str(exc)}) from exc
     except FeatureNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail={"code": "features_unavailable", "message": str(exc)}) from exc
 
 
 @app.get("/api/v1/features/{station}", response_model=FeatureSeriesResponse, tags=["features"])
@@ -60,6 +88,7 @@ def feature_series(
     start: datetime = Query(..., description="UTC start timestamp."),
     end: datetime = Query(..., description="UTC end timestamp."),
 ) -> FeatureSeriesResponse:
+    start, end = parse_timestamp(start.isoformat()), parse_timestamp(end.isoformat())
     if end < start:
         raise HTTPException(status_code=400, detail="end must be greater than or equal to start.")
     try:
@@ -78,6 +107,7 @@ def data_availability(
     start: datetime = Query(..., description="UTC start timestamp."),
     end: datetime = Query(..., description="UTC end timestamp."),
 ) -> DataAvailabilityResponse:
+    start, end = parse_timestamp(start.isoformat()), parse_timestamp(end.isoformat())
     if end < start:
         raise HTTPException(status_code=400, detail="end must be greater than or equal to start.")
     try:

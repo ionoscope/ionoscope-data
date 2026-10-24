@@ -11,6 +11,15 @@ class HealthResponse(BaseModel):
     service: str
 
 
+class ErrorDetail(BaseModel):
+    code: str
+    message: str
+
+
+class ErrorResponse(BaseModel):
+    detail: str | ErrorDetail
+
+
 class Station(BaseModel):
     code: str
     country: str | None = None
@@ -20,6 +29,9 @@ class Station(BaseModel):
     longitude: float | None = None
     longitude_180: float | None = None
     data_available: bool = False
+    is_active: bool | None = None
+    activity_reason: str | None = None
+    last_observation: datetime | None = None
 
 
 class StationListResponse(BaseModel):
@@ -29,6 +41,7 @@ class StationListResponse(BaseModel):
 class FeatureResponse(BaseModel):
     station: str
     timestamp: datetime
+    source_interval_end: datetime | None = None
     observation_timestamp: datetime | None = None
     latest_fof2_timestamp: datetime | None = None
     current_fof2_available: bool = False

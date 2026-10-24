@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +90,7 @@ def add_targets(frame: pd.DataFrame, config: dict[str, Any]) -> pd.DataFrame:
 def load_station_metadata(config: dict[str, Any], base_dir: Path) -> pd.DataFrame | None:
     if not config.get("include_station_metadata", False):
         return None
-    metadata_path = base_dir / config.get("station_metadata_path", "")
+    metadata_path = Path(os.environ['IONOSCOPE_STATION_METADATA']) if os.getenv('IONOSCOPE_STATION_METADATA') else base_dir / config.get("station_metadata_path", "")
     if not metadata_path.exists():
         return None
     metadata = pd.read_csv(metadata_path)
