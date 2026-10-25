@@ -358,17 +358,29 @@ def propagate_interval_features(frame: pd.DataFrame, freq: str, variable_rules: 
     if frame.empty:
         return frame
     start = frame.index.min().floor(freq)
-    end = frame.index.max().ceil(freq)
+    max_delay = max((pd.to_timedelta(variable_rules.get(c, {}).get("availability_delay", "0s"))
+                     for c in frame.columns), default=pd.Timedelta(0))
+    end = (frame.index.max() + max_delay).ceil(freq)
     grid = pd.date_range(start=start, end=end, freq=freq, tz="UTC")
     output = pd.DataFrame(index=grid)
     source_times = pd.Series(frame.index, index=frame.index)
 
     for column in frame.columns:
         valid_for = pd.to_timedelta(variable_rules.get(column, {}).get("valid_for", "0s"))
+        delay = pd.to_timedelta(variable_rules.get(column, {}).get("availability_delay", "0s"))
+        if delay < pd.Timedelta(0):
+            raise ValueError("availability_delay must not be negative")
         provenance_name = provenance_column_name(column)
-        values = frame[column].resample(freq).ffill().reindex(grid).ffill()
-        propagated_source = source_times.resample(freq).ffill().reindex(grid).ffill()
-        valid_until = propagated_source + valid_for
+        available_values = frame[column].copy()
+        available_values.index = available_values.index + delay
+        available_sources = source_times.copy()
+        available_sources.index = available_sources.index + delay
+        if variable_rules.get(column, {}).get("preserve_missing", False):
+            values = available_values.reindex(grid, method="ffill")
+        else:
+            values = available_values.resample(freq).ffill().reindex(grid).ffill()
+        propagated_source = available_sources.resample(freq).ffill().reindex(grid).ffill()
+        valid_until = propagated_source + delay + valid_for
         is_valid = propagated_source.notna() & (valid_for > pd.Timedelta(0)) & (output.index < valid_until)
 
         output[column] = values.where(is_valid)

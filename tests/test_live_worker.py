@@ -78,11 +78,12 @@ class LiveWorkerTests(unittest.TestCase):
         process.wait.side_effect = [subprocess.TimeoutExpired('collector', 1), 0]
         with patch.object(worker.subprocess, 'Popen') as popen, \
                 patch.object(worker.os, 'killpg', create=True) as kill, \
+                patch.object(worker.signal, 'SIGKILL', 9, create=True), \
                 patch.object(worker.os, 'name', 'posix'):
             popen.return_value.__enter__.return_value = process
             with self.assertRaises(subprocess.TimeoutExpired):
                 worker.run_job(['collector'], 1)
-        kill.assert_called_once_with(1234, worker.signal.SIGKILL)
+            kill.assert_called_once_with(1234, worker.signal.SIGKILL)
 
     def test_failed_preparation_never_requests_forecast(self):
         args = argparse.Namespace(workspace='/tmp/live', sources='giro', initial_hours=24,

@@ -331,3 +331,14 @@ missing feature tables both return 404 with distinct detail codes
 update_tasks/). This permits isolated API checks without using an operator queue.
 Corrupt task files and storage failures return HTTP 503 with
 `detail.code = "data_store_unavailable"`. Error responses are documented in OpenAPI.
+
+## Candidate input profile
+
+Compose enables `IONOSCOPE_INPUT_PROFILE=candidate-cs50-period-end-v1`.
+The live updater shares the holdout implementation in
+`data_preparation/candidate_inputs.py`: strict known CS >= 50, physical bounds,
+missing values retained, delayed GFZ/OMNI drivers, and eight days of lag history.
+The committed generation includes `features/input_contract.json` and the state
+records its profile and preparation time. Source additions trigger history
+backfill. Missing external drivers stay missing; failed generations never
+replace the active pointer. Standalone legacy preparation remains available.

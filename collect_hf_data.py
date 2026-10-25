@@ -391,7 +391,9 @@ def collect_gfz_indices(
             query["status"] = status_filter
         url = f"{base_url}?{urlencode(query)}"
         raw = fetch_url(url, data=None, timeout=timeout)
-        raw_path = paths.raw_gfz / f"{safe_name(str(index))}_{start:%Y%m%dT%H%M}_{end:%Y%m%dT%H%M}.json"
+        # ap and Ap are different products on case-insensitive filesystems too.
+        index_key = f"{safe_name(str(index))}_{str(index).encode('utf-8').hex()}"
+        raw_path = paths.raw_gfz / f"{index_key}_{start:%Y%m%dT%H%M}_{end:%Y%m%dT%H%M}.json"
         raw_path.write_bytes(raw)
         payload = read_json_bytes(raw)
         records.extend(parse_gfz_index_payload(payload, str(index), raw_path.name))

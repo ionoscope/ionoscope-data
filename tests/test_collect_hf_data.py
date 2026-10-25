@@ -12,6 +12,20 @@ from unittest.mock import MagicMock
 
 
 class FetchPlatformTests(unittest.TestCase):
+    def test_gfz_daily_and_three_hour_ap_have_distinct_raw_paths_on_windows(self):
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            paths = SimpleNamespace(raw_gfz=Path(directory))
+            payloads = [json.dumps({'datetime': ['2025-01-01T00:00:00Z'], key: [value]}).encode()
+                        for key, value in [('ap', 3), ('Ap', 7)]]
+            with patch.object(collector, 'fetch_url', side_effect=payloads):
+                rows = collector.collect_gfz_indices({'gfz': {'indices': ['ap', 'Ap']}}, paths,
+                    datetime(2025, 1, 1, tzinfo=timezone.utc), datetime(2025, 1, 2, tzinfo=timezone.utc), 5)
+            names = [row['raw_file'] for row in rows]
+            self.assertEqual(len({name.casefold() for name in names}), 2)
+            self.assertEqual(len(list(Path(directory).glob('*.json'))), 2)
+
     def test_parallel_event_writes_preserve_every_record(self):
         from concurrent.futures import ThreadPoolExecutor
         import os

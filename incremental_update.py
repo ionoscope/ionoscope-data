@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import shutil
 import sys
 from datetime import UTC, datetime, timedelta
@@ -102,6 +103,8 @@ def main() -> None:
     parser.add_argument("--cs-filter", choices=["threshold", "off"],
                         help="Defaults to saved mode, or threshold for a new workspace.")
     parser.add_argument("--min-cs", type=float, help="Defaults to saved cutoff, or 50.")
+    parser.add_argument('--input-profile', choices=['legacy', 'candidate-cs50-period-end-v1'],
+                        default=os.getenv('IONOSCOPE_INPUT_PROFILE', 'legacy'))
     args = parser.parse_args()
     if args.overlap_hours <= 0 or args.initial_hours <= 0:
         parser.error("Collection windows must be positive")
@@ -118,7 +121,10 @@ def main() -> None:
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {
             "stations": stations, "sources": args.sources, "batches": [], "last_end": None,
         }
-        if (state["stations"] != stations and not args.dynamic_stations) or state["sources"] != args.sources:
+        old_sources = set(state['sources'].split(',')) if state['sources'] != 'all' else {'giro', 'gfz', 'omni', 'noaa'}
+        new_sources = set(args.sources.split(',')) if args.sources != 'all' else {'giro', 'gfz', 'omni', 'noaa'}
+        source_upgrade = (args.input_profile == 'candidate-cs50-period-end-v1' and old_sources <= new_sources)
+        if (state["stations"] != stations and not args.dynamic_stations) or (state["sources"] != args.sources and not source_upgrade):
             raise ValueError("Use a separate workspace when changing stations or sources")
         cs_filter = args.cs_filter or state.get("cs_filter", "threshold")
         min_cs = args.min_cs if args.min_cs is not None else state.get("min_cs", 50.0)
@@ -145,6 +151,9 @@ def main() -> None:
             start = collection_start(end, utc(state["last_end"]) if state["last_end"] else None, args.overlap_hours)
             if not state["last_end"]:
                 start = end - timedelta(hours=args.initial_hours)
+            if args.input_profile == 'candidate-cs50-period-end-v1' and (
+                    state.get('input_profile') != args.input_profile or state['sources'] != args.sources):
+                start = min(start, end - timedelta(days=8))
             batch = workspace / "batches" / (end.strftime("%Y%m%dT%H%M%S") + "_" + uuid4().hex[:8])
             batch.mkdir(parents=True)
             config = batch / "collection.toml"
@@ -170,7 +179,12 @@ def main() -> None:
             # Build existing normalized stations together; a missing station must
             # not abort preparation for all the others.
             prepare_command.extend(['--station-set', str(selection)])
-        run_command(prepare_command)
+        if args.input_profile == 'candidate-cs50-period-end-v1':
+            from data_preparation.candidate_inputs import prepare_live
+            prepare_live(generation / 'data', generation / 'normalized', generation / 'features', stations, end)
+            cs_filter, min_cs = 'threshold', 50.0
+        else:
+            run_command(prepare_command)
         usable = stations
         if not args.prepare_only:
             if args.dynamic_stations:
@@ -186,11 +200,14 @@ def main() -> None:
             else:
                 validate_generation(generation, stations, end)
         state['stations'] = stations
+        state['sources'] = args.sources
         state['available_stations'] = usable
         state["batches"] = [str(batch.relative_to(workspace)) for batch in batches]
         state["generation"] = str(generation.relative_to(workspace))
         state["cs_filter"] = cs_filter
         state["min_cs"] = min_cs
+        state['input_profile'] = args.input_profile
+        state['prepared_at'] = datetime.now(UTC).isoformat()
         temporary = state_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(state, indent=2), encoding="utf-8")
         temporary.replace(state_path)
