@@ -76,6 +76,19 @@ class DataApiTests(unittest.TestCase):
     def test_empty_table_or_no_completed_rows_reports_missing_features(self):
         self.write([{'time_utc': (datetime.now(UTC)+timedelta(minutes=1)).isoformat(), 'foF2': 4}])
         self.assertEqual(self.client.get('/api/v1/features/TR169/latest').status_code, 404)
+
+    def test_partial_history_preserves_default_coverage_rule(self):
+        self.write([{'time_utc': '2025-09-01T00:00:00Z', 'foF2': 4,
+                     'foF2_source_timestamp': '2025-09-01T00:10:00Z'}])
+        params = {'start': '2025-08-31T00:00:00Z', 'end': '2025-09-02T00:00:00Z'}
+        self.assertEqual(self.client.get('/api/v1/features/TR169', params=params).status_code, 409)
+        response = self.client.get('/api/v1/features/TR169', params={**params, 'allow_partial': True})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()['records']), 1)
+        self.file.unlink()
+        response = self.client.get('/api/v1/features/TR169', params={**params, 'allow_partial': True})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['records'], [])
         self.write([])
         self.assertEqual(self.client.get('/api/v1/features/TR169/latest').status_code, 404)
 
