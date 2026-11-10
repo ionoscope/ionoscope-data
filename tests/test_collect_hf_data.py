@@ -12,6 +12,74 @@ from unittest.mock import MagicMock
 
 
 class FetchPlatformTests(unittest.TestCase):
+    def test_live_auxiliary_failure_preserves_giro_and_is_logged(self):
+        from datetime import datetime, UTC
+        with tempfile.TemporaryDirectory() as directory:
+            paths = collector.init_paths({"run": {}}, argparse.Namespace(output_dir=directory))
+            now = datetime.now(UTC)
+            with patch.object(collector, "collect_giro", return_value=[{"station": "TR169"}]), \
+                    patch.object(collector, "collect_omni", side_effect=RuntimeError("offline")):
+                result = collector.collect_sources({"omni": {"continue_on_error": True}},
+                    paths, now, now, 90, {"giro", "omni"})
+                self.assertEqual(result["giro"], [{"station": "TR169"}])
+                self.assertEqual(result["omni"], [])
+                with self.assertRaises(RuntimeError):
+                    collector.collect_sources({}, paths, now, now, 90, {"giro", "omni"})
+            event = json.loads((paths.logs / "collection_events.jsonl").read_text().strip())
+            self.assertEqual(event["source"], "OMNI")
+            self.assertEqual(event["status"], "failed")
+
+    def test_live_gfz_retains_successful_indices_after_timeout(self):
+        from datetime import datetime, UTC
+        with tempfile.TemporaryDirectory() as directory:
+            paths = collector.init_paths({"run": {}}, argparse.Namespace(output_dir=directory))
+            config = {"gfz": {"continue_on_error": True, "timeout_seconds": 15,
+                              "attempts": 1, "indices": ["Kp", "ap"]}}
+            payload = json.dumps({"datetime": ["2026-11-09T06:00:00Z"], "ap": [7]}).encode()
+            with patch.object(collector, "fetch_url", side_effect=[RuntimeError("slow"), payload]) as fetch:
+                now = datetime.now(UTC)
+                rows = collector.collect_gfz_indices(config, paths, now, now, 90)
+            self.assertEqual([(r["index"], r["value"]) for r in rows], [("ap", 7)])
+            self.assertTrue(all(c.kwargs["timeout"] == 15 and c.kwargs["attempts"] == 1
+                                for c in fetch.call_args_list))
+
+    def test_sources_start_concurrently_and_preserve_results(self):
+        import threading
+        from contextlib import ExitStack
+        from datetime import datetime, UTC
+
+        barrier = threading.Barrier(4)
+        def source(name):
+            def collect(*args):
+                barrier.wait(timeout=3)
+                return [{"source": name}]
+            return collect
+        with ExitStack() as stack:
+            for name, function in [("noaa", "collect_noaa"), ("gfz", "collect_gfz_indices"),
+                                   ("omni", "collect_omni"), ("giro", "collect_giro")]:
+                stack.enter_context(patch.object(collector, function, side_effect=source(name)))
+            now = datetime.now(UTC)
+            results = collector.collect_sources({}, None, now, now, 90,
+                                                {"noaa", "gfz", "omni", "giro"})
+        self.assertEqual(results, {name: [{"source": name}] for name in results})
+
+    def test_noaa_uses_short_timeout_and_two_attempts(self):
+        config = {"noaa": {"endpoints": [{"name": "wind", "url": "https://example.test"}]}}
+        with tempfile.TemporaryDirectory() as directory:
+            paths = collector.init_paths({"run": {}}, argparse.Namespace(output_dir=directory))
+            with patch.object(collector, "fetch_url", side_effect=TimeoutError("slow")) as fetch:
+                self.assertEqual(collector.collect_noaa(config, paths, 90), [])
+            fetch.assert_called_once_with("https://example.test", data=None, timeout=15, attempts=2)
+            events = [json.loads(line) for line in (paths.logs / "collection_events.jsonl").read_text().splitlines()]
+            self.assertEqual(events[0]["status"], "failed")
+
+    def test_giro_tls_keeps_hostname_and_chain_verification(self):
+        import ssl
+        context = collector.giro_tls_context()
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertFalse(context.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN)
+
     def test_gfz_daily_and_three_hour_ap_have_distinct_raw_paths_on_windows(self):
         from datetime import datetime, timezone
         from types import SimpleNamespace
@@ -250,6 +318,26 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(dataset[0]["Kp"], 0.667)
         self.assertEqual(dataset[0]["Kp_time_utc"], "2024-01-01T00:00:00Z")
         self.assertEqual(dataset[0]["Ap"], 7)
+
+    def test_time_join_preserves_boundaries_source_order_and_nearest_ties(self):
+        giro = [{"station": "TR169", "time_utc": "2026-01-01T01:00:00Z", "foF2": "5"}]
+        noaa = [
+            {"product": "solar_wind_plasma_2_hour", "time_utc": timestamp, "speed": speed}
+            for timestamp, speed in [
+                ("2026-01-01T02:00:00Z", 500),
+                ("2026-01-01T00:00:00Z", 400),
+                ("2026-01-01T02:00:00Z", 550),
+                ("2026-01-01T02:00:01Z", 900),
+            ]
+        ]
+        gfz = [
+            {"index": "Kp", "time_utc": "2026-01-01T02:00:00Z", "value": 7},
+            {"index": "Kp", "time_utc": "2026-01-01T00:00:00Z", "value": 2},
+        ]
+        result = collector.build_analytical_dataset(giro, noaa, gfz, tolerance_minutes=60)[0]
+        self.assertEqual(result["sw_speed_km_s"], 550)
+        self.assertEqual(result["Kp"], 7)
+        self.assertEqual(result["Kp_time_utc"], "2026-01-01T02:00:00Z")
 
     def test_parse_omni_hourly_listing_normalizes_rows(self):
         text = """

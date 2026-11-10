@@ -150,9 +150,20 @@ def resolve_station_codes(stations: str, station_set: str) -> list[str]:
     return []
 
 
-def prepare_collection_config(config_path: Path, station_codes: list[str], output_dir: Path) -> str:
+def prepare_collection_config(config_path: Path, station_codes: list[str], output_dir: Path,
+                              *, live: bool = False) -> str:
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     config.setdefault("run", {})["output_dir"] = str(output_dir)
+    if live:
+        # Auxiliary outages must not discard fresh GIRO observations. Existing
+        # immutable history is merged downstream; freshness checks still apply.
+        for source in ("gfz", "omni"):
+            section = config.setdefault(source, {})
+            section.setdefault("timeout_seconds", 15)
+            section.setdefault("attempts", 1)
+            section.setdefault("continue_on_error", True)
+        config.setdefault("giro", {}).setdefault("timeout_seconds", 30)
+        config["giro"].setdefault("attempts", 1)
     if station_codes:
         config.setdefault("giro", {})["stations"] = station_codes
     return dumps_toml(config)

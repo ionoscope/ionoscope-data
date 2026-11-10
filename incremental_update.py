@@ -129,6 +129,7 @@ def main() -> None:
         cs_filter = args.cs_filter or state.get("cs_filter", "threshold")
         min_cs = args.min_cs if args.min_cs is not None else state.get("min_cs", 50.0)
         batches = [workspace / name for name in state["batches"]]
+        previous_batch_count = len(batches)
         if args.seed_dir:
             if batches:
                 raise ValueError("--seed-dir is only allowed for an empty workspace")
@@ -157,7 +158,7 @@ def main() -> None:
             batch = workspace / "batches" / (end.strftime("%Y%m%dT%H%M%S") + "_" + uuid4().hex[:8])
             batch.mkdir(parents=True)
             config = batch / "collection.toml"
-            config.write_text(prepare_collection_config(Path(args.config), stations, batch), encoding="utf-8")
+            config.write_text(prepare_collection_config(Path(args.config), stations, batch, live=True), encoding="utf-8")
             print(f"Downloading {start.isoformat()} through {end.isoformat()}", flush=True)
             run_command([sys.executable, "collect_hf_data.py", "--config", str(config), "--sources", args.sources,
                          "--start", start.isoformat(), "--end", end.isoformat()])
@@ -168,7 +169,16 @@ def main() -> None:
         from source_rate import release_priority
         release_priority()
         generation = workspace / "generations" / uuid4().hex
-        merge_batches(batches, generation / "data")
+        previous_data = workspace / state.get('generation', 'not_prepared') / 'data'
+        # A committed generation already contains the merged immutable history.
+        # Re-reading every overlapping batch makes live preparation grow with
+        # uptime. Apply only new batches to that checkpoint; retain a full
+        # rebuild for prepare-only and for missing/incomplete checkpoints.
+        merge_inputs = batches
+        if (not args.prepare_only and (previous_data / 'processed').is_dir()
+                and (previous_data / 'raw/giro').is_dir()):
+            merge_inputs = [previous_data, *batches[previous_batch_count:]]
+        merge_batches(merge_inputs, generation / "data")
         prepare_command = [sys.executable, "update_prepared_data.py", "--skip-collection", "--stations", ",".join(stations),
                      "--cs-filter", cs_filter, "--min-cs", str(min_cs),
                      "--data-dir", str(generation / "data"), "--cleaned-dir", str(generation / "cleaned"),

@@ -13,6 +13,21 @@ Candidates do not authorize forecasts: the live worker still checks recent
 physical foF2, CS and completed intervals. A shared rate gate enforces six-second
 spacing and HTTP 429 cooldown across processes; background discovery yields to
 live updates. A slow catalog scan does not block the foreground cycle.
+The collector fetches NOAA, GFZ, OMNI and GIRO concurrently (up to four
+source tasks), while retaining the shared GIRO rate gate. Publication still
+waits for all selected sources. NOAA defaults to a 15-second socket timeout
+(capped by the run timeout) and two attempts per endpoint, configurable with
+`noaa.timeout_seconds` and `noaa.attempts`. Incremental live collection defaults
+GFZ and OMNI to one 15-second attempt and logs their network failures without
+discarding successful GIRO data. GFZ retains successful indices when another
+index fails. GIRO live requests default to one 30-second attempt. Explicit
+source settings override these live defaults; direct historical collection
+retains strict GFZ/OMNI failure behavior. The merge retains collected history,
+missing drivers remain missing, and forecast freshness checks are unchanged.
+Live preparation merges new batches into the previously committed generation's
+data instead of re-reading every overlapping batch. Immutable batches remain
+available for audit. `--prepare-only` and missing checkpoints use a full rebuild.
+
 `GET /api/v1/live/status` reports progress and last success. See
 [ionoscope-infrastructure](https://github.com/ionoscope/ionoscope-infrastructure)
 and its `.env.example` for the

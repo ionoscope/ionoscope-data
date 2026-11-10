@@ -55,13 +55,13 @@ def has_feature_range(station: str, start: datetime, end: datetime) -> bool:
     return entry is not None and entry.available_from <= start and entry.available_to >= end
 
 
-def read_feature_range(station: str, start: datetime, end: datetime, *, allow_partial: bool = False) -> list[dict[str, object]]:
+def read_feature_range(station: str, start: datetime, end: datetime, *, allow_partial: bool = False, include_inactive: bool = False) -> list[dict[str, object]]:
     start, end = parse_timestamp(start.isoformat()), parse_timestamp(end.isoformat())
     station_code = station.upper()
     if not allow_partial and not has_feature_range(station_code, start, end):
         raise DataUnavailableError(f"Prepared features for {station_code} do not cover the requested period.")
 
-    path = _feature_file(station_code)
+    path = _feature_file(station_code, include_inactive=include_inactive)
     if allow_partial and not path.exists():
         return []
     records: list[dict[str, object]] = []

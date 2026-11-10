@@ -95,13 +95,14 @@ def feature_series(
     start: datetime = Query(..., description="UTC start timestamp."),
     end: datetime = Query(..., description="UTC end timestamp."),
     allow_partial: bool = Query(False, description="Return available history with partial coverage."),
+    include_inactive: bool = Query(False, description="Read historical data even if the station is currently inactive."),
 ) -> FeatureSeriesResponse:
     start, end = parse_timestamp(start.isoformat()), parse_timestamp(end.isoformat())
     if end < start:
         raise HTTPException(status_code=400, detail="end must be greater than or equal to start.")
     try:
         get_station(station)
-        records = read_feature_range(station, start, end, allow_partial=allow_partial)
+        records = read_feature_range(station, start, end, allow_partial=allow_partial, include_inactive=include_inactive)
     except StationNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except DataUnavailableError as exc:

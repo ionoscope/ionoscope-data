@@ -108,6 +108,29 @@ class IncrementalTests(unittest.TestCase):
             self.assertIn('4.2', rows[1])
             self.assertIn('---', rows[2])
 
+    def test_checkpoint_merge_matches_full_history_with_revisions_and_missing_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            batches = [root / name for name in ('first', 'second', 'new')]
+            for i, batch in enumerate(batches):
+                (batch / 'processed').mkdir(parents=True)
+                raw = batch / 'raw/giro/station=TR169/history.txt'
+                raw.parent.mkdir(parents=True)
+                raw.write_text(f'2026-11-09T06:{i * 15:02}:00Z 75 {4 + i}.0 //\n')
+                write_csv(batch / 'processed/giro.csv', [dict(source='GIRO', station='TR169',
+                    time_utc=f'2026-11-09T06:{i * 15:02}:00Z', foF2=4 + i)])
+            write_csv(batches[0] / 'processed/gfz.csv', [dict(source='GFZ', index='Kp',
+                time_utc='2026-11-09T06:00:00Z', value=3)])
+            revision = batches[2] / 'raw/giro/station=TR169/history.txt'
+            revision.write_text(revision.read_text() + '2026-11-09T06:15:00Z 75 8.0 //\n')
+            merge_batches(batches[:2], root / 'checkpoint')
+            merge_batches([root / 'checkpoint', batches[2]], root / 'incremental')
+            merge_batches(batches, root / 'full')
+            for relative in ['processed/giro.csv', 'processed/gfz.csv',
+                             'raw/giro/station=TR169/history.txt']:
+                self.assertEqual((root / 'incremental' / relative).read_bytes(),
+                                 (root / 'full' / relative).read_bytes())
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -96,3 +96,17 @@ class DataApiTests(unittest.TestCase):
         with patch.dict(os.environ, IONOSCOPE_DATA_WORKSPACE=str(self.root)):
             self.assertEqual(self.client.get('/api/v1/stations').status_code, 200)
             self.assertEqual(self.client.get('/api/v1/features/TR169/latest').status_code, 404)
+
+    def test_historical_range_can_read_an_inactive_station_without_enabling_live_data(self):
+        import json
+        generation = self.root / 'generations/old/features/stations'
+        generation.mkdir(parents=True)
+        (generation/'TR169_features.csv').write_text('time_utc,foF2,foF2_source_timestamp\n2025-09-01T00:00:00Z,4,2025-09-01T00:10:00Z\n')
+        (self.root/'state.json').write_text(json.dumps({'generation':'generations/old','available_stations':['TR169']}))
+        (self.root/'station_registry.json').write_text(json.dumps({'checked_at':datetime.now(UTC).isoformat(),'max_age_minutes':60,'stations':[{'station':'TR169','active':False,'reason':'old','last_observation':'2025-09-01T00:10:00Z'}]}))
+        with patch.dict(os.environ, IONOSCOPE_DATA_WORKSPACE=str(self.root)):
+            params = {'start':'2025-09-01T00:00:00Z','end':'2025-09-01T00:15:00Z','allow_partial':True}
+            self.assertEqual(self.client.get('/api/v1/features/TR169',params=params).json()['records'],[])
+            response = self.client.get('/api/v1/features/TR169',params={**params,'include_inactive':True})
+            self.assertEqual(len(response.json()['records']),1)
+            self.assertEqual(self.client.get('/api/v1/features/TR169/latest').status_code,404)

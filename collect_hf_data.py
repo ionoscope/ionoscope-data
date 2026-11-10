@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left, bisect_right
+from concurrent.futures import ThreadPoolExecutor
 import csv
 import json
 import re
@@ -14,13 +16,15 @@ import time
 import tomllib
 import tempfile
 import threading
+import ssl
+from functools import lru_cache
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError, HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -79,6 +83,7 @@ TIME_KEYS = (
 USER_AGENT = "giro-noaa-hf-collector/1.0 (+research data preprocessing)"
 GIRO_FORM_URL = "https://giro.uml.edu/didbase/scaled.php?tdsourcetag=s_pctim_aiomsg"
 GIRO_DATA_URL = "https://giro.uml.edu/didbase/scaled.php"
+GIRO_CHAIN_PATH = Path(__file__).resolve().parent / "certs" / "emsign-tls-g1-cross.crt"
 _GIRO_LOCK = threading.Lock()
 _GIRO_NEXT_REQUEST = 0.0
 _GIRO_BLOCKED_UNTIL = 0.0
@@ -178,6 +183,16 @@ def init_paths(config: dict[str, Any], args: argparse.Namespace) -> Paths:
     return paths
 
 
+@lru_cache(maxsize=1)
+def giro_tls_context() -> ssl.SSLContext:
+    # GIRO omits this cross-certificate. Keep system roots and require a verified
+    # chain to emSign Root CA - G1; do not trust the newer self-signed TLS root.
+    context = ssl.create_default_context()
+    context.verify_flags &= ~ssl.VERIFY_X509_PARTIAL_CHAIN
+    context.load_verify_locations(cafile=str(GIRO_CHAIN_PATH))
+    return context
+
+
 def fetch_url(url: str, *, data: dict[str, Any] | None, timeout: int, attempts: int = 3) -> bytes:
     global _GIRO_BLOCKED_UNTIL
     body = urlencode(data, doseq=True).encode("utf-8") if data else None
@@ -193,7 +208,8 @@ def fetch_url(url: str, *, data: dict[str, Any] | None, timeout: int, attempts: 
             if 'giro.uml.edu' in url:
                 wait_for_giro_slot()
             request = Request(url, data=body, headers=headers)
-            with urlopen(request, timeout=timeout) as response:
+            tls_options = {"context": giro_tls_context()} if urlsplit(url).hostname == "giro.uml.edu" else {}
+            with urlopen(request, timeout=timeout, **tls_options) as response:
                 return response.read()
         except (TimeoutError, URLError, OSError) as exc:
             if isinstance(exc, HTTPError) and exc.code == 429:
@@ -321,7 +337,11 @@ def collect_noaa(config: dict[str, Any], paths: Paths, timeout: int) -> list[dic
         name = safe_name(endpoint["name"])
         raw_path = paths.raw_noaa / f"{name}.json"
         try:
-            raw = fetch_url(endpoint["url"], data=None, timeout=timeout)
+            raw = fetch_url(
+                endpoint["url"], data=None,
+                timeout=min(timeout, int(noaa_cfg.get("timeout_seconds", 15))),
+                attempts=int(noaa_cfg.get("attempts", 2)),
+            )
             raw_path.write_bytes(raw)
             payload = read_json_bytes(raw)
         except Exception as exc:
@@ -390,7 +410,18 @@ def collect_gfz_indices(
         if status_filter:
             query["status"] = status_filter
         url = f"{base_url}?{urlencode(query)}"
-        raw = fetch_url(url, data=None, timeout=timeout)
+        try:
+            raw = fetch_url(url, data=None,
+                            timeout=int(gfz_cfg.get("timeout_seconds", timeout)),
+                            attempts=int(gfz_cfg.get("attempts", 3)))
+        except (RuntimeError, OSError) as exc:
+            if not gfz_cfg.get("continue_on_error", False):
+                raise
+            append_jsonl(paths.logs / "collection_events.jsonl", {
+                "source": "GFZ", "product": str(index), "status": "failed",
+                "error": str(exc), "time_utc": datetime.now(UTC).isoformat(),
+            })
+            continue
         # ap and Ap are different products on case-insensitive filesystems too.
         index_key = f"{safe_name(str(index))}_{str(index).encode('utf-8').hex()}"
         raw_path = paths.raw_gfz / f"{index_key}_{start:%Y%m%dT%H%M}_{end:%Y%m%dT%H%M}.json"
@@ -464,7 +495,9 @@ def collect_omni(config: dict[str, Any], paths: Paths, start: datetime, end: dat
         "back": "",
     }
     url = omni_cfg.get("api_url", "https://omniweb.gsfc.nasa.gov/cgi/nx1.cgi")
-    raw = fetch_url(url, data=body, timeout=timeout)
+    raw = fetch_url(url, data=body,
+                    timeout=int(omni_cfg.get("timeout_seconds", timeout)),
+                    attempts=int(omni_cfg.get("attempts", 3)))
     raw_path = paths.raw_omni / f"omni_hour_{start:%Y%m%d}_{end:%Y%m%d}.html"
     raw_path.write_bytes(raw)
     text = raw.decode("utf-8", errors="replace")
@@ -644,7 +677,9 @@ def _collect_giro_serial(
             }
             append_jsonl(log_path, event)
             try:
-                raw = fetch_url(GIRO_DATA_URL, data=params, timeout=timeout)
+                raw = fetch_url(GIRO_DATA_URL, data=params,
+                                timeout=int(giro_cfg.get("timeout_seconds", timeout)),
+                                attempts=int(giro_cfg.get("attempts", 3)))
                 raw_path.write_bytes(raw)
                 text = raw.decode("latin-1", errors="replace")
                 parsed_rows = parse_giro_table(text, station, str(raw_path.relative_to(paths.root)))
@@ -799,6 +834,21 @@ def build_analytical_dataset(
 ) -> list[dict[str, Any]]:
     noaa_points = [(parse_dt(row.get("time_utc")), row) for row in noaa_rows if parse_dt(row.get("time_utc"))]
     gfz_points = [(parse_dt(row.get("time_utc")), row) for row in gfz_rows if parse_dt(row.get("time_utc"))]
+    # Narrow each join to its time window, preserving source order for equal-time
+    # observations and nearest-value ties. Catch-up batches can span many days.
+    def time_index(points):
+        indexed = sorted(enumerate(points), key=lambda item: item[1][0])
+        return indexed, [point[0] for _, point in indexed]
+
+    noaa_index, noaa_times = time_index(noaa_points)
+    gfz_index, gfz_times = time_index(gfz_points)
+    tolerance = timedelta(minutes=tolerance_minutes)
+
+    def window(indexed, times, dt):
+        left = bisect_left(times, dt-tolerance)
+        right = bisect_right(times, dt+tolerance)
+        return [point for _, point in sorted(indexed[left:right], key=lambda item: item[0])]
+
     dataset: list[dict[str, Any]] = []
     valid_giro_rows = [row for row in giro_rows if not row.get("error")]
     base_rows = valid_giro_rows or [
@@ -817,9 +867,10 @@ def build_analytical_dataset(
         }
         dt = parse_dt(record["time_utc"])
         if dt:
-            nearest = nearest_noaa(dt, noaa_points, tolerance_minutes)
+            nearest = [row for _, row in window(noaa_index, noaa_times, dt)]
             record.update(extract_noaa_features(nearest))
-            record.update(extract_gfz_features(nearest_geophysical(dt, gfz_points, tolerance_minutes)))
+            record.update(extract_gfz_features(nearest_geophysical(
+                dt, window(gfz_index, gfz_times, dt), tolerance_minutes)))
         record.update(derive_hf_features(record))
         dataset.append(record)
     return dataset
@@ -933,6 +984,33 @@ def selected_sources(value: str) -> set[str]:
     return {"giro", "gfz", "omni", "noaa"} if not sources or "all" in sources else sources
 
 
+def collect_sources(config: dict[str, Any], paths: Paths, start: datetime,
+                    end: datetime, timeout: int, sources: set[str]) -> dict[str, list[dict[str, Any]]]:
+    """Collect independent providers concurrently; keep each provider's rate limits."""
+    jobs = {
+        "noaa": (collect_noaa, (config, paths, timeout)),
+        "gfz": (collect_gfz_indices, (config, paths, start, end, timeout)),
+        "omni": (collect_omni, (config, paths, start, end, timeout)),
+        "giro": (collect_giro, (config, paths, start, end, timeout)),
+    }
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {name: pool.submit(fn, *args) for name, (fn, args) in jobs.items()
+                   if name in sources}
+        results = {}
+        for name in jobs:
+            try:
+                results[name] = futures[name].result() if name in futures else []
+            except (RuntimeError, OSError) as exc:
+                if name not in {"gfz", "omni"} or not config.get(name, {}).get("continue_on_error", False):
+                    raise
+                append_jsonl(paths.logs / "collection_events.jsonl", {
+                    "source": name.upper(), "status": "failed", "error": str(exc),
+                    "time_utc": datetime.now(UTC).isoformat(),
+                })
+                results[name] = []
+        return results
+
+
 def main() -> int:
     args = parse_args()
     config = load_config(args.config)
@@ -941,10 +1019,11 @@ def main() -> int:
     timeout = int(config.get("run", {}).get("timeout_seconds", 45))
     sources = selected_sources(args.sources)
 
-    noaa_rows = filter_noaa_interval(collect_noaa(config, paths, timeout), start, end) if "noaa" in sources else []
-    gfz_rows = filter_time_interval(collect_gfz_indices(config, paths, start, end, timeout), start, end) if "gfz" in sources else []
-    omni_rows = filter_time_interval(collect_omni(config, paths, start, end, timeout), start, end) if "omni" in sources else []
-    giro_rows = clean_giro(collect_giro(config, paths, start, end, timeout), config.get("preprocess", {})) if "giro" in sources else []
+    collected = collect_sources(config, paths, start, end, timeout, sources)
+    noaa_rows = filter_noaa_interval(collected["noaa"], start, end)
+    gfz_rows = filter_time_interval(collected["gfz"], start, end)
+    omni_rows = filter_time_interval(collected["omni"], start, end)
+    giro_rows = clean_giro(collected["giro"], config.get("preprocess", {}))
     analytical = build_analytical_dataset(
         giro_rows,
         noaa_rows,

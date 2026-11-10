@@ -136,13 +136,13 @@ def get_latest_features(station: str) -> FeatureResponse:
     )
 
 
-def _feature_file(station: str) -> Path:
+def _feature_file(station: str, *, include_inactive: bool = False) -> Path:
     workspace = os.getenv("IONOSCOPE_DATA_WORKSPACE")
     if workspace:
         root = Path(workspace)
         from station_activity import activity_map
         activity = activity_map(root)
-        if activity is not None and not activity.get(station, {}).get('active', False):
+        if not include_inactive and activity is not None and not activity.get(station, {}).get('active', False):
             return root / 'inactive' / f'{station}_features.csv'
         try:
             state = json.loads((root / "state.json").read_text(encoding="utf-8"))
