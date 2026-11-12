@@ -10,47 +10,56 @@
     "gfz_Kp": {
       "source_frequency": "3h",
       "method": "interval_propagation",
-      "valid_for": "3h"
+      "valid_for": "3h",
+      "availability_delay": "3h"
     },
     "gfz_ap": {
       "source_frequency": "3h",
       "method": "interval_propagation",
-      "valid_for": "3h"
+      "valid_for": "3h",
+      "availability_delay": "3h"
     },
     "gfz_Ap": {
       "source_frequency": "1D",
       "method": "interval_propagation",
-      "valid_for": "1D"
+      "valid_for": "1D",
+      "availability_delay": "1D"
     },
     "gfz_Fobs": {
       "source_frequency": "1D",
       "method": "interval_propagation",
-      "valid_for": "1D"
+      "valid_for": "1D",
+      "availability_delay": "1D"
     },
     "gfz_Fadj": {
       "source_frequency": "1D",
       "method": "interval_propagation",
-      "valid_for": "1D"
+      "valid_for": "1D",
+      "availability_delay": "1D"
     },
     "bz_gsm_nT": {
       "source_frequency": "1h",
       "method": "interval_propagation",
-      "valid_for": "1h"
+      "valid_for": "1h",
+      "availability_delay": "1h"
     },
     "dst_nT": {
       "source_frequency": "1h",
       "method": "interval_propagation",
-      "valid_for": "1h"
+      "valid_for": "1h",
+      "availability_delay": "1h"
     },
     "flow_speed_km_s": {
       "source_frequency": "1h",
       "method": "interval_propagation",
-      "valid_for": "1h"
+      "valid_for": "1h",
+      "availability_delay": "1h"
     },
     "proton_density_n_cc": {
       "source_frequency": "1h",
       "method": "interval_propagation",
-      "valid_for": "1h"
+      "valid_for": "1h",
+      "availability_delay": "1h"
     },
     "foF2": {
       "method": "original_interval_aggregation",
