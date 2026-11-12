@@ -67,7 +67,13 @@ class LiveWorkerTests(unittest.TestCase):
     def test_one_failed_station_does_not_block_other_refreshes(self):
         good = MagicMock()
         good.__enter__.return_value.read.return_value = b'{"station":"TR169","current_fof2_available":true}'
-        with patch.object(worker, 'urlopen', side_effect=[OSError('offline'), good]) as request:
+
+        def request_forecast(request, *, timeout):
+            if json.loads(request.data)['station'] == 'BAD00':
+                raise OSError('offline')
+            return good
+
+        with patch.object(worker, 'urlopen', side_effect=request_forecast) as request:
             with self.assertRaises(worker.ForecastBatchError) as error:
                 worker.refresh_forecasts('http://api', ['BAD00', 'TR169'], 1)
         self.assertEqual(request.call_count, 2)

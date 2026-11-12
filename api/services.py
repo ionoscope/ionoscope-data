@@ -27,7 +27,7 @@ class FeatureNotFoundError(ValueError):
     pass
 
 
-def list_stations() -> list[Station]:
+def list_stations(*, station_code: str | None = None, check_forecast: bool = True) -> list[Station]:
     metadata_path = Path(os.getenv('IONOSCOPE_STATION_METADATA', str(STATION_METADATA_PATH)))
     configured_workspace = os.getenv('IONOSCOPE_DATA_WORKSPACE')
     if configured_workspace and (Path(configured_workspace) / 'station_metadata.csv').exists():
@@ -50,7 +50,7 @@ def list_stations() -> list[Station]:
     with metadata_path.open("r", encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
             code = _clean_text(row.get("station"))
-            if not code:
+            if not code or (station_code is not None and code.upper() != station_code):
                 continue
             operational = activity.get(code, {'active': False, 'reason': 'not_checked'}) if activity is not None else {}
             if workspace:
@@ -61,7 +61,7 @@ def list_stations() -> list[Station]:
                 feature_path = _feature_file(code)
                 available = feature_path.exists()
             available = available and operational.get('active') is not False
-            if activity is not None and available:
+            if check_forecast and activity is not None and available:
                 available = forecast_ready(feature_path)
             stations.append(
                 Station(
@@ -96,16 +96,16 @@ def forecast_ready(path: Path) -> bool:
         return False
 
 
-def get_station(station: str) -> Station:
+def get_station(station: str, *, check_forecast: bool = True) -> Station:
     station_code = station.upper()
-    for item in list_stations():
-        if item.code.upper() == station_code:
-            return item
+    stations = list_stations(station_code=station_code, check_forecast=check_forecast)
+    if stations:
+        return stations[0]
     raise StationNotFoundError(f"Station {station_code} was not found.")
 
 
 def get_latest_features(station: str) -> FeatureResponse:
-    station_info = get_station(station)
+    station_info = get_station(station, check_forecast=False)
     path = _feature_file(station_info.code)
     if not path.exists():
         raise FeatureNotFoundError(f"Feature table for station {station_info.code} was not found.")

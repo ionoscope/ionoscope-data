@@ -101,7 +101,7 @@ def feature_series(
     if end < start:
         raise HTTPException(status_code=400, detail="end must be greater than or equal to start.")
     try:
-        get_station(station)
+        get_station(station, check_forecast=False)
         records = read_feature_range(station, start, end, allow_partial=allow_partial, include_inactive=include_inactive)
     except StationNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

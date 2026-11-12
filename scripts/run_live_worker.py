@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 import json
 import os
@@ -34,10 +35,13 @@ def run_job(command: list[str], timeout: float) -> None:
 
 
 def save_status(path: Path, status: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(status, indent=2), encoding='utf-8')
-    temporary.replace(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(status, indent=2), encoding='utf-8')
+        temporary.replace(path)
+    except OSError as exc:
+        print(f'Could not write live worker status to {path}: {exc}', file=sys.stderr, flush=True)
 
 
 class ForecastBatchError(RuntimeError):
@@ -47,20 +51,25 @@ class ForecastBatchError(RuntimeError):
 
 
 def refresh_forecasts(api_url: str, stations: list[str], timeout: float) -> list[dict]:
-    results = []
-    errors = {}
-    for station in stations:
+    def refresh_station(station: str) -> dict:
         request = Request(api_url.rstrip('/') + '/api/v1/forecast/refresh',
                           data=json.dumps({'station': station}).encode(),
                           headers={'Content-Type': 'application/json'}, method='POST')
-        try:
-            with urlopen(request, timeout=timeout) as response:
-                payload = json.load(response)
-            if payload.get('station') != station or not payload.get('current_fof2_available'):
-                raise ValueError(f'Invalid forecast response for {station}')
-            results.append(payload)
-        except Exception as exc:
-            errors[station] = str(exc)
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.load(response)
+        if payload.get('station') != station or not payload.get('current_fof2_available'):
+            raise ValueError(f'Invalid forecast response for {station}')
+        return payload
+
+    results = []
+    errors = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        requests = {station: pool.submit(refresh_station, station) for station in stations}
+        for station, future in requests.items():
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                errors[station] = str(exc)
     if errors:
         raise ForecastBatchError(errors, results)
     return results
